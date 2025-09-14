@@ -1,12 +1,13 @@
-import finnhub
+import time
 import secret_key
 from openpyxl import Workbook
 from datetime import datetime, timezone
 import spacy
+from polygon import RESTClient
 
-from collections import Counter
+from collections import defaultdict, Counter
 
-finnhub_client = finnhub.Client(api_key=secret_key.API_KEY)
+client = RESTClient(secret_key.API_KEY)
 
 nlp = spacy.load("en_core_web_sm")
 
@@ -23,23 +24,52 @@ sheet = wb.active
 sheet.title = "News Data"
 sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary"])
 
+def fetch_news(ticker, start, end, limit=100, max_pages=5, sleep_time=65):
+    """
+        Fetch news for a ticker with pagination & backoff handling
+    """
+    results = []
+    try:
+        articles = client.list_ticker_news(
+        ticker=ticker,
+        published_utc_gte=datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+        published_utc_lte=datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+        limit=1000
+        )
+
+        page_count = 0
+        for item in articles:
+            results.append(item)
+            if len(results) % limit == 0:
+                page_count += 1
+                if page_count >= max_pages:
+                    print(f" Stopping early: reacher {max_pages} pages for {ticker}")
+                    break
+        
+        time.sleep(sleep_time)
+
+    except Exception as e:
+        print(f"Error fetching news for {ticker}: {e}")
+
+    return results
+
+start = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+end   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+news_articles = []
+
 for ticker, name in companies.items():
     print(f"Fetching news for {name} ({ticker})...")
-    news = finnhub_client.company_news(
-        ticker, 
-        _from="2025-01-01", 
-        to="2025-09-01"
-    )
+    news_articles = fetch_news(ticker, start, end)
 
-    for item in news: 
-        date_str = datetime.fromtimestamp(item["datetime"], tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    for item in news_articles:
         row = [
             name,
             ticker,
-            date_str,
-            item.get("headline", ""),
-            item.get("url", ""),
-            item.get("summary", "")
+            item.published_utc,
+            item.title,
+            item.article_url,
+            item.summary if hasattr(item, "summary") else ""
         ]
         sheet.append(row)
 
@@ -47,19 +77,22 @@ wb.save("news.xlsx")
 print("News saved to news.xlsx")
 
 
-company_mentions = Counter()
+mentions_by_source = defaultdict(Counter)
 
 for row in sheet.iter_rows(min_row=2, values_only=True):  
-    headline = row[3]  
-    summary = row[5]  
+    source_company = row[0]   
+    source_ticker = row[1]    
+    headline = row[3]
+    summary = row[5]
+
     text = f"{headline} {summary}"
-    
     doc = nlp(text)
     
     for ent in doc.ents:
         if ent.label_ == "ORG": 
-            company_mentions[ent.text] += 1
+            mentions_by_source[source_ticker][ent.text] += 1
 
-print(company_mentions)
-
-
+for ticker, counter in mentions_by_source.items():
+    print(f"\nNews for {ticker}:")
+    for org, count in counter.most_common(30):  
+        print(f"  {org}: {count} mentions")

@@ -1,1 +1,2 @@
-API_KEY = "d32qlepr01qtm6317sigd32qlepr01qtm6317sj0"
+API_KEY = "45vjtBLj9jpzWzzPpH_n6TXV1wDMgUVo"
+API_KEY_2 = "a2fa20b80e34be9354442e6c8109d017b3cfc9ed66ca55ca93754f7a4b7eacab"
