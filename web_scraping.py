@@ -24,43 +24,75 @@ sheet = wb.active
 sheet.title = "News Data"
 sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary"])
 
-def fetch_news(ticker, start, end, limit=100, max_pages=5, sleep_time=65):
+start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+def fetch_news(ticker, start, end, batch_size=500, sleep_time=65):
     """
         Fetch news for a ticker with pagination & backoff handling
     """
     results = []
+    batch_count = 0
+
     try:
-        articles = client.list_ticker_news(
+        response = client.list_ticker_news(
         ticker=ticker,
-        published_utc_gte=datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
-        published_utc_lte=datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
-        limit=1000
+        published_utc_gte=start_date,
+        published_utc_lte=end_date,
+        limit=batch_size,
+        order="asc"
         )
 
-        page_count = 0
-        for item in articles:
-            results.append(item)
-            if len(results) % limit == 0:
-                page_count += 1
-                if page_count >= max_pages:
-                    print(f" Stopping early: reacher {max_pages} pages for {ticker}")
+        current_batch = []
+        for item in response:
+            current_batch.append(item)
+            if len(current_batch) >= batch_size:
+                break
+        
+        while current_batch:
+            results.extend(current_batch)
+            batch_count += 1
+            print(f"  Fetched batch {batch_count} ({len(current_batch)} articles) for {ticker}. Total: {len(results)}")
+            
+            if len(current_batch) < batch_size:
+                print(f"  Reached end of articles for {ticker}")
+                break
+            
+            last_article_date = current_batch[-1].published_utc
+            
+            if last_article_date >= end_date:
+                print(f"  Reached end date for {ticker}")
+                break
+            
+            print(f"  Waiting {sleep_time} seconds before next batch...")
+            time.sleep(sleep_time)
+            
+            response = client.list_ticker_news(
+                ticker=ticker,
+                published_utc_gt=last_article_date,  
+                published_utc_lte=end_date,
+                limit=batch_size,
+                order='asc'
+            )
+            
+            current_batch = []
+            for item in response:
+                current_batch.append(item)
+                if len(current_batch) >= batch_size:
                     break
         
-        time.sleep(sleep_time)
-
+        print(f"  Total articles fetched for {ticker}: {len(results)}")
+        
     except Exception as e:
         print(f"Error fetching news for {ticker}: {e}")
-
+    
     return results
-
-start = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-end   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
 news_articles = []
 
 for ticker, name in companies.items():
     print(f"Fetching news for {name} ({ticker})...")
-    news_articles = fetch_news(ticker, start, end)
+    news_articles = fetch_news(ticker, start_date, end_date, batch_size=500, sleep_time=65)
 
     for item in news_articles:
         row = [
