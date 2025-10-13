@@ -7,9 +7,11 @@ from polygon import RESTClient
 from collections import defaultdict, Counter
 import json
 import re
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 client = RESTClient(secret_key.API_KEY)
 nlp = spacy.load("en_core_web_sm")
+sia = SentimentIntensityAnalyzer()
 
 companies = {
     "AAPL": "Apple",
@@ -143,7 +145,10 @@ if not company_lookups:
 wb = Workbook()
 sheet = wb.active
 sheet.title = "News Data"
-sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary"])
+sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary", "Sentiment Score"])
+
+daily_sheet = wb.create_sheet("Daily Sentiment")
+daily_sheet.append(["Company", "Ticker", "Date", "Average Sentiment", "Article Count"])
 
 start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -210,27 +215,57 @@ def fetch_news(ticker, start, end, batch_size=1000, sleep_time=12):
     return results
 
 news_articles = []
+daily_sentiments = defaultdict(lambda: defaultdict(list))
 
 for ticker, name in companies.items():
     print(f"Fetching news for {name} ({ticker})...")
     news_articles = fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12)
 
     for item in news_articles:
+        # Calculate sentiment score
+        text = f"{item.title} {item.summary if hasattr(item, 'summary') else ''}"
+        sentiment_scores = sia.polarity_scores(text)
+        compound_score = sentiment_scores['compound']
+
+        # Extract date without time for daily aggregation
+        article_date = item.published_utc.split('T')[0] if 'T' in item.published_utc else item.published_utc[:10]
+
+        # Store for daily aggregation
+        daily_sentiments[ticker][article_date].append(compound_score)
+
         row = [
             name,
             ticker,
             item.published_utc,
             item.title,
             item.article_url,
-            item.summary if hasattr(item, "summary") else ""
+            item.summary if hasattr(item, "summary") else "",
+            compound_score
         ]
         sheet.append(row)
 
     print(f"Waiting 65 seconds before next company...")
     time.sleep(65)
 
+# Populate Daily Sentiment sheet
+print("\nCreating daily sentiment aggregations...")
+for ticker in sorted(daily_sentiments.keys()):
+    company_name = companies.get(ticker, ticker)
+    for date in sorted(daily_sentiments[ticker].keys()):
+        scores = daily_sentiments[ticker][date]
+        avg_sentiment = sum(scores) / len(scores)
+        article_count = len(scores)
+
+        daily_sheet.append([
+            company_name,
+            ticker,
+            date,
+            avg_sentiment,
+            article_count
+        ])
+
 wb.save("news.xlsx")
-print("News saved to news.xlsx")
+print("News saved to news.xlsx with sentiment analysis")
 
 mentions_by_source = defaultdict(Counter)
 validated_mentions = defaultdict(Counter)
