@@ -11,6 +11,10 @@ import pandas as pd
 import yfinance as yf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from groq import Groq
+import torch
+
+# Import PyTorch LSTM predictor
+from lstm_predictor import train_stock_predictor
 
 client = RESTClient(secret_key.API_KEY)
 groq_client = Groq(api_key=secret_key.GROQ_API_KEY)
@@ -171,7 +175,7 @@ def is_same_company(ticker1, ticker2, name1, name2):
 
     return False
 
-def validate_ticker_quality(ticker, min_market_cap=1e9, required_exchanges=['NYSE', 'NASDAQ', 'NYQ', 'NMS']):
+def validate_ticker_quality(ticker, min_market_cap=5e9, required_exchanges=['NYSE', 'NASDAQ', 'NYQ', 'NMS']):
     """
     Validate that a ticker meets quality criteria:
     - Listed on major US exchange
@@ -323,7 +327,7 @@ def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_comp
 
 def generate_predictive_alphas(ticker, company_name, dataframe_json, related_companies):
     """
-    Use Deepseek R1 to generate predictive alpha formulas
+    Use LLM to generate predictive alpha formulas
     """
     try:
         # Get list of related company tickers for the prompt
@@ -359,7 +363,7 @@ def generate_predictive_alphas(ticker, company_name, dataframe_json, related_com
            - Technical crossovers: MACD, moving average crosses
 
         Example format (use ACTUAL ticker symbols):
-        α1 = TM_Return_5D + 0.5 × (TM_Sentiment - GM_Sentiment)
+        α1 = Return_5D + 0.5 * ({ticker}_Sentiment - GM_Sentiment)
 
         Provide ONLY 5 implementable formulas with brief explanations."""
 
@@ -380,27 +384,7 @@ def generate_predictive_alphas(ticker, company_name, dataframe_json, related_com
         print(f"Error generating alphas for {ticker}: {e}")
         return None
 
-print("Loading company tickers JSON...")
-company_lookups = load_company_tickers_json("company_tickers.json")
-
-if not company_lookups:
-    print("Warning: Could not load company data. Continuing with basic analysis...")
-
-wb = Workbook()
-sheet = wb.active
-sheet.title = "News Data"
-sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary", "Sentiment Score"])
-
-daily_sheet = wb.create_sheet("Daily Sentiment")
-daily_sheet.append(["Company", "Ticker", "Date", "Average Sentiment", "Article Count"])
-
-alpha_sheet = wb.create_sheet("Predictive Alphas")
-alpha_sheet.append(["Company", "Ticker", "Related Companies", "Generated Alphas"])
-
-start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-
-def fetch_news(ticker, start, end, batch_size=1000, sleep_time=12):
+def fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12):
     """
     Fetch news for a ticker with pagination & backoff handling
     """
@@ -461,16 +445,58 @@ def fetch_news(ticker, start, end, batch_size=1000, sleep_time=12):
 
     return results
 
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+print("="*80)
+print("STOCK PRICE PREDICTION PIPELINE")
+print("Phase 1: News Fetching & Alpha Generation")
+print("Phase 2: PyTorch LSTM Model Training")
+print("="*80)
+
+print("\nLoading company tickers JSON...")
+company_lookups = load_company_tickers_json("company_tickers.json")
+
+if not company_lookups:
+    print("Warning: Could not load company data. Continuing with basic analysis...")
+
+wb = Workbook()
+sheet = wb.active
+sheet.title = "News Data"
+sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary", "Sentiment Score"])
+
+daily_sheet = wb.create_sheet("Daily Sentiment")
+daily_sheet.append(["Company", "Ticker", "Date", "Average Sentiment", "Article Count"])
+
+alpha_sheet = wb.create_sheet("Predictive Alphas")
+alpha_sheet.append(["Company", "Ticker", "Related Companies", "Generated Alphas"])
+
+model_results_sheet = wb.create_sheet("Model Results")
+model_results_sheet.append(["Company", "Ticker", "MSE", "RMSE", "MAE", "MAPE", "Directional Accuracy"])
+
+start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
 news_articles = []
 daily_sentiments = defaultdict(lambda: defaultdict(list))
 mentions_by_source = defaultdict(Counter)
 validated_mentions = defaultdict(Counter)
 invalid_mentions = defaultdict(Counter)
 stock_dataframes = {}
+alpha_texts = {}
+
+# ========================================================================
+# PHASE 1: NEWS FETCHING & SENTIMENT ANALYSIS
+# ========================================================================
+
+print("\n" + "="*80)
+print("PHASE 1: FETCHING NEWS AND ANALYZING SENTIMENT")
+print("="*80)
 
 # First pass: Fetch news and sentiment data
 for ticker, name in companies.items():
-    print(f"Fetching news for {name} ({ticker})...")
+    print(f"\nFetching news for {name} ({ticker})...")
     news_articles = fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12)
 
     for item in news_articles:
@@ -524,11 +550,15 @@ for ticker in sorted(daily_sentiments.keys()):
             article_count
         ])
 
-# Second pass: Fetch stock data and generate alphas
+# ========================================================================
+# PHASE 2: STOCK DATA & ALPHA GENERATION
+# ========================================================================
+
 print("\n" + "="*80)
-print("FETCHING STOCK DATA AND GENERATING PREDICTIVE ALPHAS")
+print("PHASE 2: FETCHING STOCK DATA AND GENERATING ALPHAS")
 print("="*80)
 
+# Second pass: Fetch stock data and generate alphas
 for ticker, name in companies.items():
     print(f"\nProcessing {name} ({ticker})...")
 
@@ -606,6 +636,7 @@ for ticker, name in companies.items():
             )
 
             if alphas:
+                alpha_texts[ticker] = alphas
                 alpha_sheet.append([
                     name,
                     ticker,
@@ -622,10 +653,113 @@ for ticker, name in companies.items():
 
         time.sleep(2)
 
-wb.save("news.xlsx")
+# ========================================================================
+# PHASE 3: PYTORCH LSTM MODEL TRAINING
+# ========================================================================
+
 print("\n" + "="*80)
-print("Analysis complete! Saved to news.xlsx with predictive alphas")
+print("PHASE 3: TRAINING PYTORCH LSTM MODELS")
 print("="*80)
+
+# Check if CUDA is available
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
+if device == 'cuda':
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+trained_models = {}
+
+for ticker, name in companies.items():
+    if ticker not in stock_dataframes or ticker not in alpha_texts:
+        print(f"\nSkipping {ticker}: Missing data or alphas")
+        continue
+
+    print(f"\n{'='*80}")
+    print(f"TRAINING PYTORCH LSTM MODEL FOR {name} ({ticker})")
+    print(f"{'='*80}")
+
+    # Get comprehensive dataframe
+    stock_df = stock_dataframes[ticker]
+    related_companies = []
+    for company_str, _ in validated_mentions[ticker].most_common(5):
+        match = re.search(r'\(([A-Z]+)\)', company_str)
+        if match:
+            related_ticker = match.group(1)
+            if related_ticker != ticker:
+                related_companies.append(related_ticker)
+
+    comprehensive_df = prepare_dataframe_for_alpha(
+        ticker,
+        stock_df,
+        daily_sentiments,
+        related_companies
+    )
+
+    if comprehensive_df is None or comprehensive_df.empty:
+        print(f"Failed to prepare data for {ticker}")
+        continue
+
+    # Train the PyTorch model
+    try:
+        model, metrics, scalers = train_stock_predictor(
+            ticker=ticker,
+            company_name=name,
+            comprehensive_df=comprehensive_df,
+            alpha_text=alpha_texts[ticker],
+            window_size=5,
+            num_epochs=50,
+            device=device
+        )
+
+        if model is not None:
+            trained_models[ticker] = {
+                'model': model,
+                'metrics': metrics,
+                'scalers': scalers
+            }
+
+            # Save metrics to Excel
+            model_results_sheet.append([
+                name,
+                ticker,
+                metrics['MSE'],
+                metrics['RMSE'],
+                metrics['MAE'],
+                metrics['MAPE'],
+                metrics['Directional Accuracy']
+            ])
+
+            # Save model
+            torch.save(model.state_dict(), f'{ticker}_model.pth')
+            print(f"\n✓ Model saved as {ticker}_model.pth")
+
+    except Exception as e:
+        print(f"\n✗ Error training model for {ticker}: {e}")
+        import traceback
+        traceback.print_exc()
+        continue
+
+    print(f"\nWaiting 5 seconds before next model...")
+    time.sleep(5)
+
+# ========================================================================
+# SAVE RESULTS
+# ========================================================================
+
+wb.save("stock_analysis_complete.xlsx")
+print("\n" + "="*80)
+print("PIPELINE COMPLETE!")
+print("="*80)
+print(f"\nResults saved to:")
+print(f"  - stock_analysis_complete.xlsx (all data)")
+print(f"  - <TICKER>_model.pth (trained PyTorch models)")
+print(f"  - <TICKER>_predictions.png (prediction plots)")
+print(f"  - <TICKER>_training_history.png (training curves)")
+
+print(f"\nModels trained: {len(trained_models)}/{len(companies)}")
+for ticker in trained_models:
+    metrics = trained_models[ticker]['metrics']
+    print(f"  {ticker}: RMSE={metrics['RMSE']:.2f}, Directional Accuracy={metrics['Directional Accuracy']:.2f}%")
 
 # Print summary statistics
 if company_lookups:
