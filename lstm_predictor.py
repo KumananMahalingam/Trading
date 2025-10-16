@@ -413,17 +413,18 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
     scaler_alphas = StandardScaler()
     scaler_price = StandardScaler()
 
-    # FIX 1: Use .loc to avoid SettingWithCopyWarning
-    # FIX 2: Fit scaler on both close and target together
-    df.loc[:, alpha_cols] = scaler_alphas.fit_transform(df[alpha_cols])
+    # Convert to proper numpy arrays to avoid dtype issues
+    alpha_values = df[alpha_cols].values.astype(float)
+    df[alpha_cols] = scaler_alphas.fit_transform(alpha_values)
 
-    # Fit the price scaler on BOTH close and target columns together
-    price_data = df[['close', 'target']].values
-    scaler_price.fit(price_data)
+    # Scale close and target together (they're both prices)
+    # Fit scaler on BOTH columns at once
+    price_cols = ['close', 'target']
+    price_values = df[price_cols].values.astype(float)
+    scaled_prices = scaler_price.fit_transform(price_values)
 
-    # Now transform each column
-    df.loc[:, 'close'] = scaler_price.transform(df[['close']])
-    df.loc[:, 'target'] = scaler_price.transform(df[['target']])
+    # Assign scaled values back
+    df[price_cols] = scaled_prices
 
     # Split data: 70% train, 15% val, 15% test
     train_size = int(0.7 * len(df))
