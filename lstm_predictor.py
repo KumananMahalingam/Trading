@@ -213,43 +213,110 @@ class AlphaComputer:
     """
     def __init__(self, df):
         self.df = df.copy()
+        self.available_columns = set(df.columns)
 
     def parse_alpha_formula(self, formula_str):
         """
-        Extract variable names and operations from alpha formula
-        Simple parser for basic arithmetic operations
+        Extract formula from text
         """
         # Remove alpha label (e.g., "α1 = " or "Alpha 1:")
         formula = re.sub(r'^[αA]lpha\s*\d+[\s:=]+', '', formula_str, flags=re.IGNORECASE)
-
         return formula.strip()
+
+    def check_formula_columns(self, formula):
+        """
+        Check if all columns referenced in formula exist in DataFrame
+        Returns: (is_valid, missing_columns)
+        """
+        # Look for missing sentiment columns
+        sentiment_pattern = r'([A-Z]+)_Sentiment'
+        sentiment_matches = re.findall(sentiment_pattern, formula)
+
+        missing_cols = []
+        for ticker in sentiment_matches:
+            col_name = f'{ticker}_Sentiment'
+            if col_name not in self.available_columns:
+                missing_cols.append(col_name)
+
+        # Check for column names that look like DataFrame columns
+        potential_cols = re.findall(r'\b[A-Z][A-Za-z0-9_]*\b', formula)
+        for col in potential_cols:
+            if col in ['Return', 'SMA', 'EMA', 'MACD', 'BB', 'RSI']:
+                # These are prefixes, check if full column exists
+                continue
+            if col + '_' in formula and col not in self.available_columns:
+                # Might be a column prefix
+                continue
+
+        return len(missing_cols) == 0, missing_cols
 
     def compute_alpha(self, formula):
         """
         Compute alpha value from formula string
-        Uses pandas eval for safe evaluation
+        Uses pandas eval for safe evaluation with proper error handling
         """
         try:
             # Replace common mathematical symbols
             formula = formula.replace('×', '*').replace('÷', '/')
             formula = formula.replace('−', '-')  # Unicode minus
 
-            # Compute using pandas eval (safer than Python eval)
+            # Check if all required columns exist
+            is_valid, missing_cols = self.check_formula_columns(formula)
+            if not is_valid:
+                print(f"    Missing columns: {', '.join(missing_cols)}")
+                return None
+
+            # Compute using pandas eval
             result = self.df.eval(formula, engine='python')
 
+            # Check if result is valid
+            if result is None:
+                return None
+
+            # If result is a DataFrame, take first column
+            if isinstance(result, pd.DataFrame):
+                if result.shape[1] > 0:
+                    result = result.iloc[:, 0]
+                else:
+                    return None
+
+            # Convert to Series if needed
+            if isinstance(result, (int, float)):
+                result = pd.Series([result] * len(self.df), index=self.df.index)
+            elif not isinstance(result, pd.Series):
+                try:
+                    result = pd.Series(result, index=self.df.index)
+                except:
+                    return None
+
+            # Check for NaN/Inf values
+            if result.isna().all():
+                return None
+
             return result
+
+        except NameError as e:
+            # Column doesn't exist
+            missing_col = str(e).split("'")[1] if "'" in str(e) else "unknown"
+            return None
+        except SyntaxError as e:
+            return None
         except Exception as e:
-            print(f"Error computing formula '{formula}': {e}")
             return None
 
     def add_alphas_from_text(self, alpha_text, max_alphas=5):
         """
         Parse LLM output text and add computed alphas to dataframe
         """
-        # Split by common delimiters
         lines = alpha_text.split('\n')
 
         alphas_added = 0
+        attempted = 0
+
+        # Show available sentiment columns
+        sentiment_cols = [col for col in self.available_columns if 'Sentiment' in col]
+        if sentiment_cols:
+            print(f"  Available sentiment columns: {', '.join(sentiment_cols)}")
 
         for line in lines:
             if alphas_added >= max_alphas:
@@ -257,8 +324,14 @@ class AlphaComputer:
 
             # Look for lines that contain formulas (with = sign)
             if '=' in line and any(char.isalpha() for char in line):
+                attempted += 1
+
                 try:
                     formula = self.parse_alpha_formula(line)
+
+                    # Skip empty formulas
+                    if not formula or len(formula) < 3:
+                        continue
 
                     # Compute alpha
                     alpha_values = self.compute_alpha(formula)
@@ -267,13 +340,20 @@ class AlphaComputer:
                         alphas_added += 1
                         col_name = f'alpha_{alphas_added}'
                         self.df[col_name] = alpha_values
-                        print(f"  ✓ Added {col_name}: {formula[:60]}...")
+                        print(f"  ✓ Added {col_name}: {formula[:80]}...")
+                    else:
+                        print(f"  ✗ Could not compute: {line[:80]}...")
+
                 except Exception as e:
-                    print(f"  ✗ Could not parse: {line[:60]}... ({e})")
+                    print(f"  ✗ Error: {line[:80]}... ({e})")
                     continue
 
-        return self.df, alphas_added
+        print(f"  Summary: Added {alphas_added}/{attempted} alphas")
 
+        if alphas_added == 0:
+            print(f"  ⚠️  WARNING: No alphas computed! Check if LLM used correct column names.")
+
+        return self.df, alphas_added
 
 # ============================================================================
 # Data Preparation Functions
@@ -333,9 +413,17 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
     scaler_alphas = StandardScaler()
     scaler_price = StandardScaler()
 
-    df[alpha_cols] = scaler_alphas.fit_transform(df[alpha_cols])
-    df[['close']] = scaler_price.fit_transform(df[['close']])
-    df[['target']] = scaler_price.transform(df[['target']])
+    # FIX 1: Use .loc to avoid SettingWithCopyWarning
+    # FIX 2: Fit scaler on both close and target together
+    df.loc[:, alpha_cols] = scaler_alphas.fit_transform(df[alpha_cols])
+
+    # Fit the price scaler on BOTH close and target columns together
+    price_data = df[['close', 'target']].values
+    scaler_price.fit(price_data)
+
+    # Now transform each column
+    df.loc[:, 'close'] = scaler_price.transform(df[['close']])
+    df.loc[:, 'target'] = scaler_price.transform(df[['target']])
 
     # Split data: 70% train, 15% val, 15% test
     train_size = int(0.7 * len(df))
