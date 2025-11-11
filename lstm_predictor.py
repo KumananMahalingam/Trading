@@ -407,7 +407,7 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
         print(f"Warning: Insufficient data for {ticker} ({len(df)} rows)")
         return None, None, None, None, 0
 
-    # Scale features
+# Scale features
     alpha_cols = [col for col in df.columns if col.startswith('alpha_')]
 
     scaler_alphas = StandardScaler()
@@ -425,6 +425,11 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
 
     # Assign scaled values back
     df[price_cols] = scaled_prices
+
+    # Create a separate scaler JUST for inverse transforming single predictions
+    # This scaler only knows about 1 column (close price)
+    scaler_single = StandardScaler()
+    scaler_single.fit(df[['close']].values)
 
     # Split data: 70% train, 15% val, 15% test
     train_size = int(0.7 * len(df))
@@ -448,7 +453,7 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
 
     scalers = {
         'alphas': scaler_alphas,
-        'price': scaler_price
+        'price': scaler_single  # ← USE SINGLE-COLUMN SCALER
     }
 
     return train_loader, val_loader, test_loader, scalers, num_alphas
