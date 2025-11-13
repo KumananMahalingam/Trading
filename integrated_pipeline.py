@@ -1,6 +1,5 @@
 import time
 import secret_key
-from openpyxl import Workbook, load_workbook
 from datetime import datetime, timezone
 import spacy
 from polygon import RESTClient
@@ -13,9 +12,16 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from groq import Groq
 import torch
 import os
+import numpy as np
 
-# Import PyTorch LSTM predictor
+# Import modules
 from lstm_predictor import train_stock_predictor
+from data_storage import (
+    save_all_data_to_excel,
+    load_all_data_from_excel,
+    check_data_completeness,
+    display_data_summary
+)
 
 client = RESTClient(secret_key.API_KEY)
 groq_client = Groq(api_key=secret_key.GROQ_API_KEY)
@@ -39,87 +45,14 @@ COMPANY_ALIASES = {
 }
 
 # ============================================================================
-# SENTIMENT CACHE FUNCTIONS
+# CONFIGURATION
 # ============================================================================
 
-def load_existing_sentiment_data(excel_path="stock_analysis_complete.xlsx"):
-    """
-    Load existing sentiment data from Excel to avoid re-fetching
-    Returns: dict of {ticker: {date: [scores]}}
-    """
-    if not os.path.exists(excel_path):
-        print(f"No existing file found at {excel_path}, starting fresh...")
-        return defaultdict(lambda: defaultdict(list))
-
-    print(f"\nLoading existing sentiment data from {excel_path}...")
-    daily_sentiments = defaultdict(lambda: defaultdict(list))
-
-    try:
-        wb = load_workbook(excel_path, read_only=True)
-
-        # Check if Daily Sentiment sheet exists
-        if "Daily Sentiment" not in wb.sheetnames:
-            print("  No 'Daily Sentiment' sheet found, starting fresh...")
-            wb.close()
-            return daily_sentiments
-
-        sheet = wb["Daily Sentiment"]
-
-        # Skip header row
-        rows = list(sheet.iter_rows(min_row=2, values_only=True))
-
-        for row in rows:
-            if len(row) >= 5:
-                company_name, ticker, date, avg_sentiment, article_count = row[:5]
-
-                if ticker and date and avg_sentiment is not None and article_count:
-                    # Reconstruct the sentiment scores (approximate)
-                    # Since we only have average, we'll create article_count copies
-                    # This maintains the average while keeping track of article count
-                    scores = [avg_sentiment] * int(article_count)
-                    daily_sentiments[ticker][date] = scores
-
-        wb.close()
-
-        # Summary
-        tickers_found = len(daily_sentiments)
-        total_days = sum(len(dates) for dates in daily_sentiments.values())
-
-        print(f"  ✓ Loaded sentiment data for {tickers_found} tickers")
-        print(f"  ✓ Total days with sentiment: {total_days}")
-
-        # Show what was loaded
-        for ticker in sorted(daily_sentiments.keys()):
-            days = len(daily_sentiments[ticker])
-            print(f"    - {ticker}: {days} days")
-
-        return daily_sentiments
-
-    except Exception as e:
-        print(f"  Error loading existing data: {e}")
-        print("  Starting with fresh sentiment data...")
-        return defaultdict(lambda: defaultdict(list))
-
-
-def should_fetch_sentiment(ticker, daily_sentiments, min_days=30):
-    """
-    Check if we need to fetch sentiment for a ticker
-    Returns: True if we should fetch, False if we already have enough data
-    """
-    if ticker not in daily_sentiments:
-        return True
-
-    days_with_data = len(daily_sentiments[ticker])
-
-    if days_with_data < min_days:
-        print(f"    Only {days_with_data} days of data for {ticker}, fetching more...")
-        return True
-
-    print(f"    Already have {days_with_data} days of data for {ticker}, skipping...")
-    return False
+DATA_FILE = "stock_analysis_complete.xlsx"
+FORCE_REFETCH = False  # Set to True to force re-fetching all data
 
 # ============================================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (same as before)
 # ============================================================================
 
 def load_company_tickers_json(file_path="company_tickers.json"):
@@ -253,105 +186,155 @@ def fetch_stock_data(ticker, start_date, end_date):
         print(f"  Error fetching stock data for {ticker}: {e}")
         return pd.DataFrame()
 
+def calculate_adx(df, period=14):
+    """Calculate Average Directional Index (ADX)"""
+    high_diff = df['high'].diff()
+    low_diff = -df['low'].diff()
+
+    plus_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
+    minus_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
+
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    atr = np.max(ranges, axis=1).rolling(period).mean()
+
+    plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
+
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(period).mean()
+
+    return adx
+
 def calculate_technical_indicators(df):
+    """ENHANCED: Calculate comprehensive technical indicators"""
     if df.empty:
         return df
+
+    # Moving Averages
     df['SMA_5'] = df['close'].rolling(window=5).mean()
+    df['SMA_10'] = df['close'].rolling(window=10).mean()
     df['SMA_20'] = df['close'].rolling(window=20).mean()
     df['SMA_50'] = df['close'].rolling(window=50).mean()
+    df['SMA_200'] = df['close'].rolling(window=200).mean()
+
     df['EMA_12'] = df['close'].ewm(span=12, adjust=False).mean()
     df['EMA_26'] = df['close'].ewm(span=26, adjust=False).mean()
+
+    # MACD
     df['MACD'] = df['EMA_12'] - df['EMA_26']
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+
+    # Bollinger Bands
     df['BB_Middle'] = df['close'].rolling(window=20).mean()
     bb_std = df['close'].rolling(window=20).std()
     df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
     df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
+    df['BB_Position'] = (df['close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
+
+    # Returns
     df['Return_1D'] = df['close'].pct_change(1)
     df['Return_5D'] = df['close'].pct_change(5)
     df['Return_20D'] = df['close'].pct_change(20)
+    df['Return_60D'] = df['close'].pct_change(60)
+
+    # Volatility
+    df['Volatility_5D'] = df['Return_1D'].rolling(window=5).std()
     df['Volatility_20D'] = df['Return_1D'].rolling(window=20).std()
+    df['Volatility_60D'] = df['Return_1D'].rolling(window=60).std()
+
+    # Volume indicators
+    df['Volume_SMA_20'] = df['volume'].rolling(window=20).mean()
+    df['Volume_Ratio'] = df['volume'] / df['Volume_SMA_20']
+
+    # Price momentum
+    df['Momentum_5'] = df['close'] - df['close'].shift(5)
+    df['Momentum_10'] = df['close'] - df['close'].shift(10)
+    df['Momentum_20'] = df['close'] - df['close'].shift(20)
+
+    # Rate of change
+    df['ROC_5'] = ((df['close'] - df['close'].shift(5)) / df['close'].shift(5)) * 100
+    df['ROC_10'] = ((df['close'] - df['close'].shift(10)) / df['close'].shift(10)) * 100
+
+    # Average True Range (ATR)
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    df['ATR'] = true_range.rolling(14).mean()
+
+    # On-Balance Volume (OBV)
+    df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+
+    # Money Flow Index (MFI)
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    money_flow = typical_price * df['volume']
+
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
+    mfi_ratio = positive_flow / negative_flow
+    df['MFI'] = 100 - (100 / (1 + mfi_ratio))
+
+    # Stochastic Oscillator
+    low_14 = df['low'].rolling(14).min()
+    high_14 = df['high'].rolling(14).max()
+    df['Stochastic_K'] = 100 * (df['close'] - low_14) / (high_14 - low_14)
+    df['Stochastic_D'] = df['Stochastic_K'].rolling(3).mean()
+
+    # Williams %R
+    df['Williams_R'] = -100 * (high_14 - df['close']) / (high_14 - low_14)
+
+    # Trend strength (ADX)
+    df['ADX'] = calculate_adx(df)
+
     return df
 
 def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_companies):
+    """ENHANCED: Prepare dataframe with sentiment lag features"""
     if stock_df.empty:
         return None
+
     df = calculate_technical_indicators(stock_df.copy())
+
+    # Add sentiment
     sentiment_dict = {}
     for date, scores in daily_sentiments[ticker].items():
         sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
     df[f'{ticker}_Sentiment'] = df['date'].map(sentiment_dict).fillna(0)
+
+    # Add lagged sentiment
+    df[f'{ticker}_Sentiment_Lag1'] = df[f'{ticker}_Sentiment'].shift(1)
+    df[f'{ticker}_Sentiment_Lag5'] = df[f'{ticker}_Sentiment'].shift(5)
+
+    # Sentiment momentum
+    df[f'{ticker}_Sentiment_Change'] = df[f'{ticker}_Sentiment'].diff()
+    df[f'{ticker}_Sentiment_MA5'] = df[f'{ticker}_Sentiment'].rolling(5).mean()
+
+    # Related company sentiments
     for related_ticker in related_companies:
         if related_ticker in daily_sentiments:
             related_sentiment_dict = {}
             for date, scores in daily_sentiments[related_ticker].items():
                 related_sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
             df[f'{related_ticker}_Sentiment'] = df['date'].map(related_sentiment_dict).fillna(0)
-    for related_ticker in related_companies:
-        if f'{related_ticker}_Sentiment' in df.columns:
-            df[f'Sentiment_Div_{ticker}_{related_ticker}'] = df[f'{ticker}_Sentiment'] - df[f'{related_ticker}_Sentiment']
+
+            # Sentiment divergence
+            df[f'Sentiment_Div_{ticker}_{related_ticker}'] = \
+                df[f'{ticker}_Sentiment'] - df[f'{related_ticker}_Sentiment']
+
     return df
-
-def generate_predictive_alphas(ticker, company_name, dataframe_json, related_companies):
-    try:
-        related_list = ", ".join(related_companies) if related_companies else "None available"
-
-        # Extract available sentiment columns from the dataframe
-        sample_df = pd.read_json(dataframe_json)
-        available_sentiment_cols = [col for col in sample_df.columns if 'Sentiment' in col]
-
-        prompt = f"""Generating Predictive Alphas for {company_name} ({ticker}) Stock Prices
-
-CRITICAL: You can ONLY use these exact column names:
-
-Stock Features: close, open, high, low, volume
-Technical Indicators: RSI, SMA_5, SMA_20, SMA_50, EMA_12, EMA_26, MACD, MACD_Signal, BB_Upper, BB_Middle, BB_Lower
-Returns: Return_1D, Return_5D, Return_20D
-Volatility: Volatility_20D
-Sentiment Columns AVAILABLE: {', '.join(available_sentiment_cols)}
-
-DO NOT use any other sentiment columns unless they appear in the list above.
-
-Related Companies: {related_list}
-
-DataFrame Sample:
-{dataframe_json}
-
-Generate 5 alpha formulas using ONLY the columns listed above. Focus on:
-1. Momentum and mean reversion using technical indicators
-2. Sentiment from available columns only
-3. Combinations of price action and sentiment
-
-Examples:
-α1 = Return_5D + 0.2 * Return_20D
-α2 = (RSI - 50) / 50
-α3 = MACD - MACD_Signal
-α4 = (close - SMA_20) / SMA_20
-α5 = Return_5D + 0.1 * {ticker}_Sentiment
-
-Provide ONLY 5 formulas."""
-
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are a quantitative analyst. Generate alpha formulas using ONLY the exact column names provided. DO NOT invent column names."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=1500
-        )
-
-        alphas = response.choices[0].message.content
-        return alphas
-
-    except Exception as e:
-        print(f"Error generating alphas for {ticker}: {e}")
-        return None
 
 def generate_simple_alphas(ticker):
     """Fallback alphas that don't require related company sentiment"""
@@ -362,6 +345,128 @@ def generate_simple_alphas(ticker):
 α4 = (close - SMA_20) / SMA_20
 α5 = Return_5D + 0.1 * {ticker}_Sentiment
 """
+
+def generate_alphas_with_groq(ticker, company_name, comprehensive_df, related_companies, max_retries=3):
+    """
+    Generate predictive alphas using Groq LLM based on available data
+    """
+    print(f"\n  Generating alphas for {company_name} ({ticker}) using Groq LLM...")
+
+    # Prepare a sample of the dataframe (last 30 days to keep prompt manageable)
+    sample_df = comprehensive_df.tail(30).copy()
+
+    # Convert to JSON format for the prompt
+    df_json = sample_df.to_json(orient='records', date_format='iso', indent=2)
+
+    # Build list of available features
+    available_features = list(sample_df.columns)
+    stock_features = [col for col in available_features if col in ['close', 'open', 'high', 'low', 'volume', 'date']]
+    technical_indicators = [col for col in available_features if any(ind in col.upper() for ind in
+                           ['SMA', 'EMA', 'RSI', 'MACD', 'BB_', 'ATR', 'OBV', 'MFI', 'STOCHASTIC', 'WILLIAMS', 'ADX', 'ROC', 'MOMENTUM', 'VOLATILITY', 'RETURN'])]
+    sentiment_features = [col for col in available_features if 'Sentiment' in col]
+
+    # Build related companies string
+    related_str = ", ".join(related_companies) if related_companies else "None available"
+
+    # Construct the prompt
+    prompt = f"""Task: Generate Predictive Alphas for {company_name}'s Stock Prices
+
+Objective: Generate 5 formulaic alpha signals to predict {company_name} ({ticker}) stock prices using:
+1. Stock features (e.g., close, open, high, low, volume)
+2. Technical indicators (e.g., RSI, moving averages, MACD, Bollinger Bands)
+3. Sentiment data for the target company and related companies
+
+Input Data:
+A pandas DataFrame with rows representing trading days and the following columns:
+
+Stock Features: {', '.join(stock_features)}
+Technical Indicators: {', '.join(technical_indicators[:20])}{'...' if len(technical_indicators) > 20 else ''}
+Sentiment Features: {', '.join(sentiment_features)}
+
+Related Companies: {related_str}
+
+Sample Data (last 30 days):
+{df_json}
+
+Requirements:
+1. Alpha Formulation: Propose exactly 5 formulaic alphas combining:
+   - Stock features and technical indicators
+   - Cross-company sentiment divergences (if available)
+   - Momentum and trend signals
+   - Volatility-adjusted returns
+
+2. Feature Engineering Considerations:
+   - Use normalized inputs where appropriate
+   - Combine multiple timeframes (short-term vs long-term signals)
+   - Leverage sentiment divergence between {ticker} and related companies
+   - Consider mean-reversion and momentum strategies
+
+3. Output Format:
+   Return ONLY the alpha formulas in this exact format (no explanations, no markdown):
+
+α1 = <formula using column names exactly as provided>
+α2 = <formula using column names exactly as provided>
+α3 = <formula using column names exactly as provided>
+α4 = <formula using column names exactly as provided>
+α5 = <formula using column names exactly as provided>
+
+Example Alphas (DO NOT copy these, generate new ones based on the actual data):
+α1 = Return_5D + 0.5 * {ticker}_Sentiment
+α2 = (RSI - 50) / 50 + 0.3 * {ticker}_Sentiment_Change
+α3 = MACD_Hist / ATR
+α4 = (close - SMA_20) / SMA_20 * (1 + {ticker}_Sentiment_MA5)
+α5 = Return_20D * (Volume_Ratio - 1)
+
+IMPORTANT:
+- Use ONLY column names that exist in the provided data
+- Formulas must be valid Python expressions
+- Avoid division by zero (use indicators that are non-zero)
+- Keep formulas relatively simple (2-4 terms each)
+"""
+
+    # Call Groq API with retries
+    for attempt in range(max_retries):
+        try:
+            print(f"    Attempt {attempt + 1}/{max_retries}...")
+
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",  # or "mixtral-8x7b-32768"
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a quantitative finance expert specializing in alpha generation for stock prediction models. Generate formulaic alphas using technical analysis and sentiment signals. Output ONLY the alpha formulas in the specified format, nothing else."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.7,
+                max_tokens=1000,
+                top_p=0.9
+            )
+
+            alpha_text = response.choices[0].message.content.strip()
+
+            # Basic validation - check if we got 5 alphas
+            alpha_lines = [line for line in alpha_text.split('\n') if line.strip().startswith('α')]
+
+            if len(alpha_lines) >= 5:
+                print(f"    ✓ Successfully generated {len(alpha_lines)} alphas")
+                return alpha_text
+            else:
+                print(f"    ⚠ Only got {len(alpha_lines)} alphas, retrying...")
+
+        except Exception as e:
+            print(f"    ✗ Error on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            else:
+                print(f"    Falling back to simple alphas for {ticker}")
+                return generate_simple_alphas(ticker)
+
+    # Fallback if all retries failed
+    return generate_simple_alphas(ticker)
 
 def fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12):
     results = []
@@ -410,25 +515,15 @@ def fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12):
     return results
 
 def fetch_sentiment_for_ticker(ticker, start_date, end_date, daily_sentiments):
-    """
-    Fetch news and compute sentiment for a specific ticker
-    Updates daily_sentiments dict in place
-    """
+    """Fetch news and compute sentiment for a specific ticker"""
     print(f"  Fetching sentiment data for {ticker}...")
 
-    # Check if already fetched
-    if ticker in daily_sentiments and len(daily_sentiments[ticker]) > 0:
-        print(f"    Already have sentiment data for {ticker}")
-        return
-
-    # Fetch news
     news_articles = fetch_news(ticker, start_date, end_date, batch_size=500, sleep_time=12)
 
     if not news_articles:
         print(f"    No news articles found for {ticker}")
         return
 
-    # Process sentiment
     for item in news_articles:
         text = f"{item.title} {item.summary if hasattr(item, 'summary') else ''}"
         sentiment_scores = sia.polarity_scores(text)
@@ -439,199 +534,318 @@ def fetch_sentiment_for_ticker(ticker, start_date, end_date, daily_sentiments):
 
     print(f"    Processed {len(news_articles)} articles, {len(daily_sentiments[ticker])} days of sentiment")
 
+def check_essential_data_only(file_path, tickers):
+    """Check only for daily sentiments, stock data, and related companies"""
+    try:
+        if not os.path.exists(file_path):
+            return False
+
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, read_only=True)
+        sheet_names = wb.sheetnames
+
+        # Check for essential sheets only
+        if 'Daily Sentiment' not in sheet_names:
+            print("  Missing: Daily Sentiment sheet")
+            wb.close()
+            return False
+
+        if 'Related Companies' not in sheet_names:
+            print("  Missing: Related Companies sheet")
+            wb.close()
+            return False
+
+        if 'Stock Prices' not in sheet_names:
+            print("  Missing: Stock Prices sheet")
+            wb.close()
+            return False
+
+        # Quick validation that sheets have data
+        sentiments_sheet = wb['Daily Sentiment']
+        related_sheet = wb['Related Companies']
+        stock_sheet = wb['Stock Prices']
+
+        # Check if sheets have headers + at least one data row
+        sentiment_rows = list(sentiments_sheet.iter_rows(min_row=2, max_row=2, values_only=True))
+        related_rows = list(related_sheet.iter_rows(min_row=2, max_row=2, values_only=True))
+        stock_rows = list(stock_sheet.iter_rows(min_row=2, values_only=True))
+
+        if not sentiment_rows or not sentiment_rows[0][0]:
+            print("  Daily Sentiment sheet is empty")
+            wb.close()
+            return False
+
+        if not related_rows or not related_rows[0][0]:
+            print("  Related Companies sheet is empty")
+            wb.close()
+            return False
+
+        if not stock_rows or not stock_rows[0][0]:
+            print("  Stock Prices sheet is empty")
+            wb.close()
+            return False
+
+        # Check all required tickers exist in the Stock Prices sheet
+        tickers_in_file = set()
+        for row in stock_rows:
+            if len(row) >= 1 and row[0]:
+                tickers_in_file.add(row[0])
+
+        wb.close()
+
+        missing_tickers = set(tickers) - tickers_in_file
+        if missing_tickers:
+            print(f"  Missing stock data for: {', '.join(missing_tickers)}")
+            return False
+
+        print("  ✓ All essential data found in cache")
+        return True
+
+    except Exception as e:
+        print(f"  Error checking cache: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
 print("="*80)
-print("STOCK PRICE PREDICTION PIPELINE")
-print("Phase 0: Load Existing Sentiment Data")
-print("Phase 1: News Fetching & Sentiment Analysis")
-print("Phase 2: Related Company Sentiment Collection")
-print("Phase 3: Alpha Generation & LSTM Training")
+print("IMPROVED STOCK PRICE PREDICTION PIPELINE (WITH DATA CACHING)")
 print("="*80)
 
 print("\nLoading company tickers JSON...")
 company_lookups = load_company_tickers_json("company_tickers.json")
 
-if not company_lookups:
-    print("Warning: Could not load company data.")
-
 # ========================================================================
-# PHASE 0: LOAD EXISTING SENTIMENT DATA
+# CHECK IF WE CAN LOAD FROM CACHE
 # ========================================================================
 
-print("\n" + "="*80)
-print("PHASE 0: CHECKING FOR EXISTING SENTIMENT DATA")
-print("="*80)
+load_from_cache = False
 
-daily_sentiments = load_existing_sentiment_data("stock_analysis_complete.xlsx")
+if not FORCE_REFETCH and check_essential_data_only(DATA_FILE, list(companies.keys())):
+    print(f"\n{'='*80}")
+    print("COMPLETE DATA FOUND IN CACHE")
+    print(f"{'='*80}")
 
-# ========================================================================
-# PREPARE EXCEL WORKBOOK
-# ========================================================================
+    user_input = input("\nLoad data from cache? (yes/no) [yes]: ").strip().lower()
+    if user_input in ['', 'yes', 'y']:
+        load_from_cache = True
 
-wb = Workbook()
-sheet = wb.active
-sheet.title = "News Data"
-sheet.append(["Company", "Ticker", "Date", "Headline", "URL", "Summary", "Sentiment Score"])
+if load_from_cache:
+    # ====================================================================
+    # LOAD ALL DATA FROM EXCEL
+    # ====================================================================
+    (daily_sentiments, stock_dataframes, validated_mentions,
+     all_related_companies, alpha_texts, success) = load_all_data_from_excel(DATA_FILE)
 
-daily_sheet = wb.create_sheet("Daily Sentiment")
-daily_sheet.append(["Company", "Ticker", "Date", "Average Sentiment", "Article Count"])
+    if not success:
+        print("Failed to load data from cache. Falling back to data collection...")
+        load_from_cache = False
+    else:
+        print("\n✓ Loaded essential data from cache")
+        print(f"  - Daily sentiment for {len(daily_sentiments)} tickers")
+        print(f"  - Stock data for {len(stock_dataframes)} tickers")
+        print(f"  - Related companies for {len(all_related_companies)} tickers")
+        print(f"  - Alpha formulas for {len(alpha_texts)} tickers")
 
-alpha_sheet = wb.create_sheet("Predictive Alphas")
-alpha_sheet.append(["Company", "Ticker", "Related Companies", "Generated Alphas"])
+        # ✅ USE CACHED ALPHAS - Only regenerate if missing
+        print("\n" + "="*80)
+        print("CHECKING ALPHA FORMULAS")
+        print("="*80)
 
-model_results_sheet = wb.create_sheet("Model Results")
-model_results_sheet.append(["Company", "Ticker", "MSE", "RMSE", "MAE", "MAPE", "Directional Accuracy"])
+        missing_alphas = []
+        for ticker in companies.keys():
+            if ticker not in alpha_texts or not alpha_texts[ticker]:
+                missing_alphas.append(ticker)
+                print(f"  ⚠ Missing alpha formula for {ticker}")
+            else:
+                print(f"  ✓ Loaded alpha formula for {ticker}")
 
-start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        # Only regenerate missing alphas
+        if missing_alphas:
+            print(f"\n{'='*80}")
+            print(f"GENERATING MISSING ALPHAS FOR {len(missing_alphas)} TICKERS")
+            print(f"{'='*80}")
 
-mentions_by_source = defaultdict(Counter)
-validated_mentions = defaultdict(Counter)
-stock_dataframes = {}
-alpha_texts = {}
-all_related_companies = {}
+            for ticker in missing_alphas:
+                name = companies[ticker]
 
-# ========================================================================
-# PHASE 1: FETCH NEWS FOR PRIMARY COMPANIES (WITH CACHE CHECK)
-# ========================================================================
+                if ticker not in stock_dataframes:
+                    print(f"\nSkipping {ticker}: No stock data available")
+                    alpha_texts[ticker] = generate_simple_alphas(ticker)
+                    continue
 
-print("\n" + "="*80)
-print("PHASE 1: FETCHING NEWS FOR PRIMARY COMPANIES (CHECKING CACHE)")
-print("="*80)
+                print(f"\nGenerating alphas for {name} ({ticker})...")
 
-for ticker, name in companies.items():
-    # CHECK IF WE ALREADY HAVE DATA
-    if not should_fetch_sentiment(ticker, daily_sentiments, min_days=30):
-        print(f"\n✓ Skipping {name} ({ticker}) - already have sentiment data")
-        print(f"   No new data will be collected for this ticker")
-        continue
+                stock_df = stock_dataframes[ticker]
+                related_companies = all_related_companies.get(ticker, [])
 
-    print(f"\nFetching news for {name} ({ticker})...")
-    news_articles = fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12)
+                # Prepare comprehensive dataframe
+                comprehensive_df = prepare_dataframe_for_alpha(
+                    ticker,
+                    stock_df,
+                    daily_sentiments,
+                    related_companies
+                )
 
-    for item in news_articles:
-        text = f"{item.title} {item.summary if hasattr(item, 'summary') else ''}"
-        sentiment_scores = sia.polarity_scores(text)
-        compound_score = sentiment_scores['compound']
+                if comprehensive_df is None or comprehensive_df.empty:
+                    print(f"  Failed to prepare data, using simple alphas")
+                    alpha_texts[ticker] = generate_simple_alphas(ticker)
+                    continue
 
-        article_date = item.published_utc.split('T')[0] if 'T' in item.published_utc else item.published_utc[:10]
-        daily_sentiments[ticker][article_date].append(compound_score)
+                # Generate alphas using Groq
+                alpha_text = generate_alphas_with_groq(
+                    ticker,
+                    name,
+                    comprehensive_df,
+                    related_companies
+                )
 
-        doc = nlp(text)
-        for ent in doc.ents:
-            if ent.label_ == "ORG":
-                if company_lookups:
-                    is_valid, mention_ticker, official_name = validate_company_exists(ent.text, company_lookups)
-                    if is_valid:
-                        validated_mentions[ticker][f"{official_name} ({mention_ticker})"] += 1
+                alpha_texts[ticker] = alpha_text
 
-        row = [name, ticker, item.published_utc, item.title, item.article_url,
-               item.summary if hasattr(item, "summary") else "", compound_score]
-        sheet.append(row)
+                print(f"\nGenerated alphas for {ticker}:")
+                print(alpha_text)
+                print()
 
-    print(f"Waiting 65 seconds before next company...")
-    time.sleep(65)
+                # Small delay to avoid rate limiting
+                time.sleep(2)
 
-# ========================================================================
-# PHASE 1.5: IDENTIFY AND FETCH RELATED COMPANY SENTIMENT (WITH CACHE)
-# ========================================================================
+            # Save updated alphas to cache
+            save_all_data_to_excel(
+                DATA_FILE,
+                daily_sentiments,
+                stock_dataframes,
+                validated_mentions,
+                all_related_companies,
+                alpha_texts
+            )
+        else:
+            print(f"\n✓ All alpha formulas loaded from cache - no API calls needed!")
 
-print("\n" + "="*80)
-print("PHASE 1.5: IDENTIFYING AND FETCHING RELATED COMPANY SENTIMENT")
-print("="*80)
+if not load_from_cache:
+    # ====================================================================
+    # FETCH ALL DATA (ORIGINAL PIPELINE)
+    # ====================================================================
 
-all_related_tickers = set()
+    start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
-# First, identify all related companies
-for ticker, name in companies.items():
-    print(f"\nIdentifying related companies for {name} ({ticker})...")
+    daily_sentiments = defaultdict(lambda: defaultdict(list))
+    validated_mentions = defaultdict(Counter)
+    stock_dataframes = {}
+    alpha_texts = {}
+    all_related_companies = {}
 
-    related_companies = []
-    for company_str, count in validated_mentions[ticker].most_common(20):
-        if len(related_companies) >= 5:
-            break
+    print("\n" + "="*80)
+    print("PHASE 1: FETCHING NEWS FOR PRIMARY COMPANIES")
+    print("="*80)
 
-        match = re.search(r'\(([A-Z]+)\)', company_str)
-        if not match:
+    for ticker, name in companies.items():
+        print(f"\nFetching news for {name} ({ticker})...")
+        news_articles = fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12)
+
+        for item in news_articles:
+            text = f"{item.title} {item.summary if hasattr(item, 'summary') else ''}"
+            sentiment_scores = sia.polarity_scores(text)
+            compound_score = sentiment_scores['compound']
+
+            article_date = item.published_utc.split('T')[0] if 'T' in item.published_utc else item.published_utc[:10]
+            daily_sentiments[ticker][article_date].append(compound_score)
+
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ == "ORG":
+                    if company_lookups:
+                        is_valid, mention_ticker, official_name = validate_company_exists(ent.text, company_lookups)
+                        if is_valid:
+                            validated_mentions[ticker][f"{official_name} ({mention_ticker})"] += 1
+
+        print(f"Waiting 65 seconds before next company...")
+        time.sleep(65)
+
+    print("\n" + "="*80)
+    print("PHASE 2: IDENTIFYING AND FETCHING RELATED COMPANY SENTIMENT")
+    print("="*80)
+
+    all_related_tickers = set()
+
+    for ticker, name in companies.items():
+        print(f"\nIdentifying related companies for {name} ({ticker})...")
+
+        related_companies = []
+        for company_str, count in validated_mentions[ticker].most_common(20):
+            if len(related_companies) >= 5:
+                break
+
+            match = re.search(r'\(([A-Z]+)\)', company_str)
+            if not match:
+                continue
+
+            related_ticker = match.group(1)
+
+            if related_ticker == ticker:
+                continue
+
+            related_name = company_str.split('(')[0].strip()
+
+            if is_same_company(ticker, related_ticker, name, related_name):
+                continue
+
+            is_valid, reason = validate_ticker_quality(related_ticker, min_market_cap=5e9)
+            if not is_valid:
+                print(f"    ✗ Skipped {related_ticker}: {reason}")
+                continue
+
+            related_companies.append(related_ticker)
+            all_related_tickers.add(related_ticker)
+            print(f"    ✓ Added {related_ticker} ({related_name}): {count} mentions")
+
+        all_related_companies[ticker] = related_companies
+        print(f"  Found {len(related_companies)} related companies")
+
+    print(f"\n{'='*80}")
+    print(f"FETCHING SENTIMENT FOR {len(all_related_tickers)} UNIQUE RELATED COMPANIES")
+    print(f"{'='*80}")
+
+    for related_ticker in all_related_tickers:
+        print(f"\nFetching sentiment for {related_ticker}...")
+        fetch_sentiment_for_ticker(related_ticker, start_date, end_date, daily_sentiments)
+        print(f"Waiting 15 seconds before next company...")
+        time.sleep(15)
+
+    print("\n" + "="*80)
+    print("PHASE 3: FETCHING STOCK DATA")
+    print("="*80)
+
+    for ticker, name in companies.items():
+        print(f"\nFetching stock data for {name} ({ticker})...")
+        stock_df = fetch_stock_data(ticker, start_date, end_date)
+        if not stock_df.empty:
+            stock_dataframes[ticker] = stock_df
+        time.sleep(2)
+
+    # ====================================================================
+    # PHASE 3.5: GENERATING ALPHAS WITH GROQ LLM (ONCE!)
+    # ====================================================================
+
+    print("\n" + "="*80)
+    print("PHASE 3.5: GENERATING ALPHAS WITH GROQ LLM")
+    print("="*80)
+
+    for ticker, name in companies.items():
+        if ticker not in stock_dataframes:
+            print(f"\nSkipping {ticker}: No stock data available")
+            alpha_texts[ticker] = generate_simple_alphas(ticker)
             continue
 
-        related_ticker = match.group(1)
+        print(f"\nGenerating alphas for {name} ({ticker})...")
 
-        if related_ticker == ticker:
-            continue
-
-        related_name = company_str.split('(')[0].strip()
-
-        if is_same_company(ticker, related_ticker, name, related_name):
-            continue
-
-        is_valid, reason = validate_ticker_quality(related_ticker, min_market_cap=5e9)
-        if not is_valid:
-            print(f"    ✗ Skipped {related_ticker}: {reason}")
-            continue
-
-        related_companies.append(related_ticker)
-        all_related_tickers.add(related_ticker)
-        print(f"    ✓ Added {related_ticker} ({related_name}): {count} mentions")
-
-    all_related_companies[ticker] = related_companies
-    print(f"  Found {len(related_companies)} related companies")
-
-# Now fetch sentiment for ALL unique related companies (WITH CACHE CHECK)
-print(f"\n{'='*80}")
-print(f"FETCHING SENTIMENT FOR {len(all_related_tickers)} UNIQUE RELATED COMPANIES (CHECKING CACHE)")
-print(f"{'='*80}")
-
-for related_ticker in all_related_tickers:
-    # CHECK IF WE ALREADY HAVE DATA
-    if not should_fetch_sentiment(related_ticker, daily_sentiments, min_days=30):
-        continue
-
-    print(f"\nFetching sentiment for {related_ticker}...")
-    fetch_sentiment_for_ticker(related_ticker, start_date, end_date, daily_sentiments)
-
-    print(f"Waiting 15 seconds before next company...")
-    time.sleep(15)
-
-# ========================================================================
-# PHASE 2: POPULATE SENTIMENT SHEET
-# ========================================================================
-
-print("\n" + "="*80)
-print("PHASE 2: CREATING DAILY SENTIMENT AGGREGATIONS")
-print("="*80)
-
-for ticker in sorted(daily_sentiments.keys()):
-    company_name = companies.get(ticker, ticker)
-    for date in sorted(daily_sentiments[ticker].keys()):
-        scores = daily_sentiments[ticker][date]
-        avg_sentiment = sum(scores) / len(scores)
-        article_count = len(scores)
-        daily_sheet.append([company_name, ticker, date, avg_sentiment, article_count])
-
-# ========================================================================
-# PHASE 3: STOCK DATA & ALPHA GENERATION
-# ========================================================================
-
-print("\n" + "="*80)
-print("PHASE 3: FETCHING STOCK DATA AND GENERATING ALPHAS")
-print("="*80)
-
-for ticker, name in companies.items():
-    print(f"\nProcessing {name} ({ticker})...")
-
-    stock_df = fetch_stock_data(ticker, start_date, end_date)
-
-    if not stock_df.empty:
-        stock_dataframes[ticker] = stock_df
-
+        stock_df = stock_dataframes[ticker]
         related_companies = all_related_companies.get(ticker, [])
 
-        print(f"  Using {len(related_companies)} related companies: {', '.join(related_companies)}")
-
+        # Prepare comprehensive dataframe
         comprehensive_df = prepare_dataframe_for_alpha(
             ticker,
             stock_df,
@@ -639,35 +853,47 @@ for ticker, name in companies.items():
             related_companies
         )
 
-        if comprehensive_df is not None and not comprehensive_df.empty:
-            sentiment_cols = [col for col in comprehensive_df.columns if 'Sentiment' in col]
-            print(f"  Available sentiment columns: {', '.join(sentiment_cols)}")
+        if comprehensive_df is None or comprehensive_df.empty:
+            print(f"  Failed to prepare data, using simple alphas")
+            alpha_texts[ticker] = generate_simple_alphas(ticker)
+            continue
 
-            sample_df = comprehensive_df.tail(10).fillna(0)
-            df_json = sample_df.to_json(orient='records', indent=2)
+        # Generate alphas using Groq
+        alpha_text = generate_alphas_with_groq(
+            ticker,
+            name,
+            comprehensive_df,
+            related_companies
+        )
 
-            print(f"  Generating predictive alphas for {ticker}...")
-            alphas = generate_predictive_alphas(ticker, name, df_json, related_companies)
+        alpha_texts[ticker] = alpha_text
 
-            if alphas:
-                alpha_texts[ticker] = alphas
-                alpha_sheet.append([name, ticker, ", ".join(related_companies) if related_companies else "None", alphas])
+        print(f"\nGenerated alphas for {ticker}:")
+        print(alpha_text)
+        print()
 
-                print(f"\n{'='*80}")
-                print(f"PREDICTIVE ALPHAS FOR {name} ({ticker})")
-                print(f"Related Companies: {', '.join(related_companies) if related_companies else 'None'}")
-                print(f"{'='*80}")
-                print(alphas)
-                print(f"{'='*80}\n")
-
+        # Small delay to avoid rate limiting
         time.sleep(2)
 
+    # ====================================================================
+    # SAVE ALL DATA TO EXCEL
+    # ====================================================================
+
+    save_all_data_to_excel(
+        DATA_FILE,
+        daily_sentiments,
+        stock_dataframes,
+        validated_mentions,
+        all_related_companies,
+        alpha_texts
+    )
+
 # ========================================================================
-# PHASE 4: PYTORCH LSTM MODEL TRAINING
+# PHASE 4: TRAINING (ALWAYS RUNS)
 # ========================================================================
 
 print("\n" + "="*80)
-print("PHASE 4: TRAINING PYTORCH LSTM MODELS")
+print("PHASE 4: TRAINING IMPROVED PYTORCH LSTM MODELS")
 print("="*80)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -681,7 +907,7 @@ for ticker, name in companies.items():
         continue
 
     print(f"\n{'='*80}")
-    print(f"TRAINING PYTORCH LSTM MODEL FOR {name} ({ticker})")
+    print(f"TRAINING IMPROVED LSTM MODEL FOR {name} ({ticker})")
     print(f"{'='*80}")
 
     stock_df = stock_dataframes[ticker]
@@ -699,43 +925,20 @@ for ticker, name in companies.items():
         continue
 
     try:
-        alpha_text = alpha_texts.get(ticker, None)
-
-        if not alpha_text:
-            print(f"  No LLM alphas, using simple alphas...")
-            alpha_text = generate_simple_alphas(ticker)
+        alpha_text = alpha_texts.get(ticker, generate_simple_alphas(ticker))
 
         model, metrics, scalers = train_stock_predictor(
             ticker=ticker,
             company_name=name,
             comprehensive_df=comprehensive_df,
             alpha_text=alpha_text,
-            window_size=5,
-            num_epochs=50,
+            window_size=20,
+            num_epochs=100,
             device=device
         )
 
-        # Fallback if training failed
-        if model is None:
-            print(f"  ⚠️  Training failed, retrying with simple alphas...")
-            alpha_text = generate_simple_alphas(ticker)
-
-            model, metrics, scalers = train_stock_predictor(
-                ticker=ticker,
-                company_name=name,
-                comprehensive_df=comprehensive_df,
-                alpha_text=alpha_text,
-                window_size=5,
-                num_epochs=50,
-                device=device
-            )
-
         if model is not None:
             trained_models[ticker] = {'model': model, 'metrics': metrics, 'scalers': scalers}
-            model_results_sheet.append([
-                name, ticker, metrics['MSE'], metrics['RMSE'],
-                metrics['MAE'], metrics['MAPE'], metrics['Directional Accuracy']
-            ])
             torch.save(model.state_dict(), f'{ticker}_model.pth')
             print(f"\n✓ Model saved as {ticker}_model.pth")
 
@@ -749,25 +952,40 @@ for ticker, name in companies.items():
     time.sleep(5)
 
 # ========================================================================
-# SAVE RESULTS
+# UPDATE EXCEL WITH TRAINING RESULTS
 # ========================================================================
 
-wb.save("stock_analysis_complete.xlsx")
+if trained_models:
+    print("\nUpdating Excel file with training results...")
+    save_all_data_to_excel(
+        DATA_FILE,
+        daily_sentiments,
+        stock_dataframes,
+        validated_mentions,
+        all_related_companies,
+        alpha_texts,
+        trained_models
+    )
+
+# ========================================================================
+# FINAL SUMMARY
+# ========================================================================
+
 print("\n" + "="*80)
 print("PIPELINE COMPLETE!")
 print("="*80)
-print(f"\nResults saved to:")
-print(f"  - stock_analysis_complete.xlsx")
-print(f"  - <TICKER>_model.pth")
-print(f"  - <TICKER>_predictions.png")
-print(f"  - <TICKER>_training_history.png")
+print(f"\nResults saved to: {DATA_FILE}")
 
 print(f"\nModels trained: {len(trained_models)}/{len(companies)}")
 for ticker in trained_models:
     metrics = trained_models[ticker]['metrics']
-    print(f"  {ticker}: RMSE={metrics['RMSE']:.2f}, Directional Accuracy={metrics['Directional Accuracy']:.2f}%")
+    mape_str = f"{metrics['MAPE']:.2f}" if metrics['MAPE'] != float('inf') else "N/A"
+    print(f"  {ticker}:")
+    print(f"    - RMSE: {metrics['RMSE']:.4f}")
+    print(f"    - MAPE: {mape_str}%")
+    print(f"    - Directional Accuracy: {metrics['Directional Accuracy']:.2f}%")
+    print(f"    - Within 1% Accuracy: {metrics['Within 1% Accuracy']:.2f}%")
 
-print(f"\nSentiment data collected for:")
-print(f"  - {len(companies)} primary companies")
-print(f"  - {len(all_related_tickers)} related companies")
-print(f"  - Total: {len(daily_sentiments)} unique tickers")
+print(f"\n💾 All data cached in {DATA_FILE}")
+print(f"   Next run will load from cache automatically!")
+print("="*80)

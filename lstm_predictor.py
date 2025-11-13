@@ -11,46 +11,79 @@ from datetime import datetime
 import re
 
 # ============================================================================
-# LSTM Model Architecture
+# IMPROVED LSTM Model Architecture with Attention
 # ============================================================================
 
-class DualStreamLSTM(nn.Module):
+class ImprovedDualStreamLSTM(nn.Module):
     """
-    Dual-Stream LSTM for stock price prediction
-    - Stream 1: Processes alpha signals
-    - Stream 2: Processes price data with temporal features
+    Enhanced Dual-Stream LSTM with attention mechanism and bidirectional processing
     """
-    def __init__(self, num_alphas=5, hidden_size=64, num_layers=2, dropout=0.2):
-        super(DualStreamLSTM, self).__init__()
+    def __init__(self, num_alphas=5, hidden_size=128, num_layers=3, dropout=0.3):
+        super(ImprovedDualStreamLSTM, self).__init__()
 
-        # Alpha stream LSTM
+        self.hidden_size = hidden_size
+
+        # Alpha stream with bidirectional LSTM
         self.alpha_lstm = nn.LSTM(
             input_size=num_alphas,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
         )
 
-        # Price stream LSTM (close + 3 temporal features)
+        # Price stream with bidirectional LSTM
         self.price_lstm = nn.LSTM(
-            input_size=4,  # close, day_of_week, day_of_month, month
+            input_size=4,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
+        )
+
+        # Attention mechanism for alpha stream
+        self.alpha_attention = nn.Sequential(
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
+
+        # Attention mechanism for price stream
+        self.price_attention = nn.Sequential(
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
         )
 
         # Fusion layers
-        self.fc1 = nn.Linear(hidden_size * 2, 128)
-        self.bn1 = nn.BatchNorm1d(128)
+        self.fc1 = nn.Linear(hidden_size * 4, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.dropout1 = nn.Dropout(dropout)
+
+        self.fc2 = nn.Linear(256, 128)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.fc3 = nn.Linear(128, 64)
+        self.bn3 = nn.BatchNorm1d(64)
+        self.dropout3 = nn.Dropout(dropout)
+
+        self.fc4 = nn.Linear(64, 1)
+
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
 
-        self.fc2 = nn.Linear(128, 64)
-        self.bn2 = nn.BatchNorm1d(64)
+    def attention_net(self, lstm_output, attention_layer):
+        """
+        Apply attention mechanism to LSTM output
+        """
+        attention_weights = attention_layer(lstm_output)  # [batch, seq_len, 1]
+        attention_weights = torch.softmax(attention_weights, dim=1)
 
-        self.fc3 = nn.Linear(64, 1)
+        # Weighted sum
+        context = torch.sum(attention_weights * lstm_output, dim=1)  # [batch, hidden*2]
+        return context
 
     def forward(self, alphas, prices_temporal):
         """
@@ -61,83 +94,46 @@ class DualStreamLSTM(nn.Module):
             predictions: [batch, 1]
         """
         # Process alpha stream
-        _, (alpha_hidden, _) = self.alpha_lstm(alphas)
-        alpha_features = alpha_hidden[-1]  # [batch, hidden_size]
+        alpha_out, _ = self.alpha_lstm(alphas)
+        alpha_features = self.attention_net(alpha_out, self.alpha_attention)
 
         # Process price stream
-        _, (price_hidden, _) = self.price_lstm(prices_temporal)
-        price_features = price_hidden[-1]  # [batch, hidden_size]
+        price_out, _ = self.price_lstm(prices_temporal)
+        price_features = self.attention_net(price_out, self.price_attention)
 
         # Combine both streams
-        combined = torch.cat([alpha_features, price_features], dim=1)  # [batch, hidden_size*2]
+        combined = torch.cat([alpha_features, price_features], dim=1)
 
-        # Dense layers with batch normalization
+        # Dense layers
         out = self.fc1(combined)
         out = self.bn1(out)
         out = self.relu(out)
-        out = self.dropout(out)
+        out = self.dropout1(out)
 
         out = self.fc2(out)
         out = self.bn2(out)
         out = self.relu(out)
-        out = self.dropout(out)
+        out = self.dropout2(out)
 
-        out = self.fc3(out)  # [batch, 1]
-
-        return out
-
-
-class SimpleLSTM(nn.Module):
-    """
-    Simple stacked LSTM that processes all features together
-    """
-    def __init__(self, num_features, hidden_size=128, num_layers=2, dropout=0.2):
-        super(SimpleLSTM, self).__init__()
-
-        self.lstm = nn.LSTM(
-            input_size=num_features,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-
-        self.fc1 = nn.Linear(hidden_size, 64)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-
-        self.fc2 = nn.Linear(64, 1)
-
-    def forward(self, x):
-        """
-        Args:
-            x: [batch, window_size, num_features]
-        Returns:
-            predictions: [batch, 1]
-        """
-        lstm_out, (hidden, _) = self.lstm(x)
-        last_hidden = hidden[-1]  # [batch, hidden_size]
-
-        out = self.fc1(last_hidden)
-        out = self.bn1(out)
+        out = self.fc3(out)
+        out = self.bn3(out)
         out = self.relu(out)
-        out = self.dropout(out)
+        out = self.dropout3(out)
 
-        out = self.fc2(out)
+        out = self.fc4(out)
 
         return out
 
 
 # ============================================================================
-# Dataset Class
+# Dataset Class (unchanged)
 # ============================================================================
 
 class StockDataset(Dataset):
     """
     Dataset for stock prediction with sliding windows
     """
-    def __init__(self, data, window_size=5, dual_stream=True):
+    def __init__(self, data, window_size=20, dual_stream=True):
         """
         Args:
             data: DataFrame with all features including alphas and target
@@ -204,7 +200,7 @@ class StockDataset(Dataset):
 
 
 # ============================================================================
-# Alpha Formula Parser and Computer
+# Alpha Formula Parser and Computer (unchanged)
 # ============================================================================
 
 class AlphaComputer:
@@ -238,27 +234,16 @@ class AlphaComputer:
             if col_name not in self.available_columns:
                 missing_cols.append(col_name)
 
-        # Check for column names that look like DataFrame columns
-        potential_cols = re.findall(r'\b[A-Z][A-Za-z0-9_]*\b', formula)
-        for col in potential_cols:
-            if col in ['Return', 'SMA', 'EMA', 'MACD', 'BB', 'RSI']:
-                # These are prefixes, check if full column exists
-                continue
-            if col + '_' in formula and col not in self.available_columns:
-                # Might be a column prefix
-                continue
-
         return len(missing_cols) == 0, missing_cols
 
     def compute_alpha(self, formula):
         """
         Compute alpha value from formula string
-        Uses pandas eval for safe evaluation with proper error handling
         """
         try:
             # Replace common mathematical symbols
             formula = formula.replace('×', '*').replace('÷', '/')
-            formula = formula.replace('−', '-')  # Unicode minus
+            formula = formula.replace('−', '-')
 
             # Check if all required columns exist
             is_valid, missing_cols = self.check_formula_columns(formula)
@@ -269,7 +254,6 @@ class AlphaComputer:
             # Compute using pandas eval
             result = self.df.eval(formula, engine='python')
 
-            # Check if result is valid
             if result is None:
                 return None
 
@@ -296,8 +280,6 @@ class AlphaComputer:
             return result
 
         except NameError as e:
-            # Column doesn't exist
-            missing_col = str(e).split("'")[1] if "'" in str(e) else "unknown"
             return None
         except SyntaxError as e:
             return None
@@ -316,7 +298,7 @@ class AlphaComputer:
         # Show available sentiment columns
         sentiment_cols = [col for col in self.available_columns if 'Sentiment' in col]
         if sentiment_cols:
-            print(f"  Available sentiment columns: {', '.join(sentiment_cols)}")
+            print(f"  Available sentiment columns: {', '.join(sentiment_cols[:10])}...")
 
         for line in lines:
             if alphas_added >= max_alphas:
@@ -345,7 +327,7 @@ class AlphaComputer:
                         print(f"  ✗ Could not compute: {line[:80]}...")
 
                 except Exception as e:
-                    print(f"  ✗ Error: {line[:80]}... ({e})")
+                    print(f"  ✗ Error: {line[:80]}...")
                     continue
 
         print(f"  Summary: Added {alphas_added}/{attempted} alphas")
@@ -356,7 +338,7 @@ class AlphaComputer:
         return self.df, alphas_added
 
 # ============================================================================
-# Data Preparation Functions
+# IMPROVED Data Preparation Functions
 # ============================================================================
 
 def add_temporal_features(df):
@@ -372,18 +354,9 @@ def add_temporal_features(df):
 
     return df
 
-def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
+def prepare_data_for_training(df, ticker, alpha_text, window_size=20):
     """
-    Prepare data for LSTM training
-
-    Args:
-        df: DataFrame with stock data and sentiment
-        ticker: Stock ticker symbol
-        alpha_text: LLM-generated alpha formulas (text)
-        window_size: Sliding window size
-
-    Returns:
-        train_loader, val_loader, test_loader, scalers, num_alphas
+    IMPROVED: Prepare data with no data leakage and percentage change target
     """
     # Add temporal features
     df = add_temporal_features(df)
@@ -397,47 +370,48 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
         print(f"Warning: No alphas computed for {ticker}")
         return None, None, None, None, 0
 
-    # Create target (next day close price)
-    df['target'] = df['close'].shift(-1)
+    # CRITICAL: Create target as percentage change (better for learning)
+    df['target'] = df['close'].pct_change(1).shift(-1)
 
     # Drop rows with NaN
     df = df.dropna()
 
-    if len(df) < window_size + 50:
+    if len(df) < window_size + 100:
         print(f"Warning: Insufficient data for {ticker} ({len(df)} rows)")
         return None, None, None, None, 0
 
-# Scale features
+    # Split data FIRST: 70% train, 15% val, 15% test
+    train_size = int(0.7 * len(df))
+    val_size = int(0.15 * len(df))
+
+    train_df = df.iloc[:train_size].copy()
+    val_df = df.iloc[train_size:train_size+val_size].copy()
+    test_df = df.iloc[train_size+val_size:].copy()
+
+    # CRITICAL: Scale features based ONLY on training data (prevent data leakage)
     alpha_cols = [col for col in df.columns if col.startswith('alpha_')]
 
     scaler_alphas = StandardScaler()
     scaler_price = StandardScaler()
+    scaler_target = StandardScaler()
 
-    # Convert to proper numpy arrays to avoid dtype issues
-    alpha_values = df[alpha_cols].values.astype(float)
-    df[alpha_cols] = scaler_alphas.fit_transform(alpha_values)
+    # Fit scalers on training data only
+    scaler_alphas.fit(train_df[alpha_cols].values.astype(float))
+    scaler_price.fit(train_df[['close']].values.astype(float))
+    scaler_target.fit(train_df[['target']].values.astype(float))
 
-    # Scale close and target together (they're both prices)
-    # Fit scaler on BOTH columns at once
-    price_cols = ['close', 'target']
-    price_values = df[price_cols].values.astype(float)
-    scaled_prices = scaler_price.fit_transform(price_values)
+    # Transform all splits
+    train_df.loc[:, alpha_cols] = scaler_alphas.transform(train_df[alpha_cols].values.astype(float))
+    train_df.loc[:, ['close']] = scaler_price.transform(train_df[['close']].values.astype(float))
+    train_df.loc[:, ['target']] = scaler_target.transform(train_df[['target']].values.astype(float))
 
-    # Assign scaled values back
-    df[price_cols] = scaled_prices
+    val_df.loc[:, alpha_cols] = scaler_alphas.transform(val_df[alpha_cols].values.astype(float))
+    val_df.loc[:, ['close']] = scaler_price.transform(val_df[['close']].values.astype(float))
+    val_df.loc[:, ['target']] = scaler_target.transform(val_df[['target']].values.astype(float))
 
-    # Create a separate scaler JUST for inverse transforming single predictions
-    # This scaler only knows about 1 column (close price)
-    scaler_single = StandardScaler()
-    scaler_single.fit(df[['close']].values)
-
-    # Split data: 70% train, 15% val, 15% test
-    train_size = int(0.7 * len(df))
-    val_size = int(0.15 * len(df))
-
-    train_df = df.iloc[:train_size]
-    val_df = df.iloc[train_size:train_size+val_size]
-    test_df = df.iloc[train_size+val_size:]
+    test_df.loc[:, alpha_cols] = scaler_alphas.transform(test_df[alpha_cols].values.astype(float))
+    test_df.loc[:, ['close']] = scaler_price.transform(test_df[['close']].values.astype(float))
+    test_df.loc[:, ['target']] = scaler_target.transform(test_df[['target']].values.astype(float))
 
     print(f"Data split: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
@@ -446,21 +420,23 @@ def prepare_data_for_training(df, ticker, alpha_text, window_size=5):
     val_dataset = StockDataset(val_df, window_size=window_size, dual_stream=True)
     test_dataset = StockDataset(test_df, window_size=window_size, dual_stream=True)
 
-    # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    # Create dataloaders with adaptive batch size
+    batch_size = min(64, max(16, len(train_dataset) // 10))
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     scalers = {
         'alphas': scaler_alphas,
-        'price': scaler_single  # ← USE SINGLE-COLUMN SCALER
+        'price': scaler_price,
+        'target': scaler_target  # Separate scaler for target
     }
 
     return train_loader, val_loader, test_loader, scalers, num_alphas
 
 
 # ============================================================================
-# Training Functions
+# IMPROVED Training Functions
 # ============================================================================
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
@@ -507,19 +483,21 @@ def validate(model, val_loader, criterion, device):
 
     return total_loss / len(val_loader)
 
-def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=5e-5, device='cpu'):
+def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1e-4, device='cpu'):
     """
-    Train the LSTM model
+    IMPROVED: Train with better hyperparameters
     """
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10
+    )
 
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
     patience_counter = 0
-    patience = 10
+    patience = 20  # Increased patience
 
     print(f"\nTraining on {device}...")
 
@@ -532,14 +510,13 @@ def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=5e
 
         scheduler.step(val_loss)
 
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 10 == 0:
             print(f"Epoch [{epoch+1}/{num_epochs}] - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
 
         # Early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            # Save best model
             torch.save(model.state_dict(), 'best_model.pth')
         else:
             patience_counter += 1
@@ -552,9 +529,9 @@ def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=5e
 
     return model, train_losses, val_losses
 
-def evaluate_model(model, test_loader, scaler_price, device):
+def evaluate_model(model, test_loader, scalers, device):
     """
-    Evaluate model on test set and calculate metrics
+    IMPROVED: Evaluate with proper metrics calculation
     """
     model.eval()
     predictions = []
@@ -574,34 +551,44 @@ def evaluate_model(model, test_loader, scaler_price, device):
     predictions = np.array(predictions).flatten()
     actuals = np.array(actuals).flatten()
 
-    # Inverse transform to get actual prices
-    predictions_unscaled = scaler_price.inverse_transform(predictions.reshape(-1, 1)).flatten()
-    actuals_unscaled = scaler_price.inverse_transform(actuals.reshape(-1, 1)).flatten()
+    # Inverse transform predictions and actuals (percentage changes)
+    predictions_unscaled = scalers['target'].inverse_transform(predictions.reshape(-1, 1)).flatten()
+    actuals_unscaled = scalers['target'].inverse_transform(actuals.reshape(-1, 1)).flatten()
 
-    # Calculate metrics
+    # Calculate metrics on percentage changes
     mse = np.mean((predictions_unscaled - actuals_unscaled) ** 2)
     rmse = np.sqrt(mse)
     mae = np.mean(np.abs(predictions_unscaled - actuals_unscaled))
-    mape = np.mean(np.abs((actuals_unscaled - predictions_unscaled) / actuals_unscaled)) * 100
 
-    # Directional accuracy
-    actual_direction = np.sign(np.diff(actuals_unscaled))
-    pred_direction = np.sign(np.diff(predictions_unscaled))
+    # MAPE: only calculate where actuals are not near zero
+    mask = np.abs(actuals_unscaled) > 0.001  # Filter out near-zero values
+    if mask.sum() > 0:
+        mape = np.mean(np.abs((actuals_unscaled[mask] - predictions_unscaled[mask]) / actuals_unscaled[mask])) * 100
+    else:
+        mape = float('inf')
+
+    # Directional accuracy (are we predicting up/down correctly?)
+    actual_direction = np.sign(actuals_unscaled)
+    pred_direction = np.sign(predictions_unscaled)
     directional_accuracy = np.mean(actual_direction == pred_direction) * 100
+
+    # Additional metric: Percentage of predictions within 1% of actual
+    within_1pct = np.mean(np.abs(predictions_unscaled - actuals_unscaled) < 0.01) * 100
 
     metrics = {
         'MSE': mse,
         'RMSE': rmse,
         'MAE': mae,
         'MAPE': mape,
-        'Directional Accuracy': directional_accuracy
+        'Directional Accuracy': directional_accuracy,
+        'Within 1% Accuracy': within_1pct
     }
 
     return predictions_unscaled, actuals_unscaled, metrics
 
 
 # ============================================================================
-# Visualization Functions
+# Visualization Functions (unchanged)
 # ============================================================================
 
 def plot_predictions(actuals, predictions, ticker, save_path=None):
@@ -610,12 +597,12 @@ def plot_predictions(actuals, predictions, ticker, save_path=None):
     """
     plt.figure(figsize=(14, 6))
 
-    plt.plot(actuals, label='Actual Price', linewidth=2, alpha=0.7)
-    plt.plot(predictions, label='Predicted Price', linewidth=2, alpha=0.7)
+    plt.plot(actuals, label='Actual % Change', linewidth=2, alpha=0.7)
+    plt.plot(predictions, label='Predicted % Change', linewidth=2, alpha=0.7)
 
     plt.xlabel('Time Steps', fontsize=12)
-    plt.ylabel('Price ($)', fontsize=12)
-    plt.title(f'{ticker} Stock Price Prediction', fontsize=14, fontweight='bold')
+    plt.ylabel('% Change', fontsize=12)
+    plt.title(f'{ticker} Stock Price % Change Prediction', fontsize=14, fontweight='bold')
     plt.legend(fontsize=11)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -648,28 +635,16 @@ def plot_training_history(train_losses, val_losses, ticker, save_path=None):
 
 
 # ============================================================================
-# Main Training Pipeline
+# IMPROVED Main Training Pipeline
 # ============================================================================
 
 def train_stock_predictor(ticker, company_name, comprehensive_df, alpha_text,
-                         window_size=5, num_epochs=50, device='cpu'):
+                         window_size=20, num_epochs=100, device='cpu'):
     """
-    Complete pipeline to train stock price predictor
-
-    Args:
-        ticker: Stock ticker symbol
-        company_name: Company name
-        comprehensive_df: DataFrame with stock data, technical indicators, sentiment
-        alpha_text: LLM-generated alpha formulas
-        window_size: Sliding window size (default: 5 days)
-        num_epochs: Number of training epochs
-        device: 'cpu' or 'cuda'
-
-    Returns:
-        model, metrics, scalers
+    IMPROVED: Complete pipeline with enhanced model and training
     """
     print("="*80)
-    print(f"TRAINING LSTM PREDICTOR FOR {company_name} ({ticker})")
+    print(f"TRAINING IMPROVED LSTM PREDICTOR FOR {company_name} ({ticker})")
     print("="*80)
 
     # Prepare data
@@ -681,33 +656,34 @@ def train_stock_predictor(ticker, company_name, comprehensive_df, alpha_text,
         print(f"Failed to prepare data for {ticker}")
         return None, None, None
 
-    # Initialize model
-    model = DualStreamLSTM(
+    # Initialize improved model
+    model = ImprovedDualStreamLSTM(
         num_alphas=num_alphas,
-        hidden_size=64,
-        num_layers=2,
-        dropout=0.2
+        hidden_size=128,  # Increased from 64
+        num_layers=3,     # Increased from 2
+        dropout=0.3       # Increased from 0.2
     ).to(device)
 
     print(f"\nModel Architecture:")
-    print(f"  - Alpha stream: {num_alphas} inputs")
-    print(f"  - Price stream: 4 inputs (close + 3 temporal)")
-    print(f"  - Hidden size: 64")
-    print(f"  - Num layers: 2")
+    print(f"  - Alpha stream: {num_alphas} inputs (bidirectional)")
+    print(f"  - Price stream: 4 inputs (bidirectional)")
+    print(f"  - Hidden size: 128")
+    print(f"  - Num layers: 3")
+    print(f"  - Attention mechanism: Yes")
     print(f"  - Total parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Train model
     model, train_losses, val_losses = train_model(
         model, train_loader, val_loader,
         num_epochs=num_epochs,
-        learning_rate=5e-5,
+        learning_rate=1e-4,
         device=device
     )
 
     # Evaluate on test set
     print("\nEvaluating on test set...")
     predictions, actuals, metrics = evaluate_model(
-        model, test_loader, scalers['price'], device
+        model, test_loader, scalers, device
     )
 
     # Print metrics
@@ -715,7 +691,10 @@ def train_stock_predictor(ticker, company_name, comprehensive_df, alpha_text,
     print(f"TEST SET RESULTS FOR {ticker}")
     print("="*80)
     for metric_name, value in metrics.items():
-        print(f"{metric_name}: {value:.4f}")
+        if value != float('inf'):
+            print(f"{metric_name}: {value:.4f}")
+        else:
+            print(f"{metric_name}: N/A")
     print("="*80)
 
     # Plot results
@@ -725,39 +704,3 @@ def train_stock_predictor(ticker, company_name, comprehensive_df, alpha_text,
                     save_path=f'{ticker}_predictions.png')
 
     return model, metrics, scalers
-
-
-# ============================================================================
-# Example Usage
-# ============================================================================
-
-if __name__ == "__main__":
-    # Example: Load data and train
-    # This assumes you have comprehensive_df and alpha_text from the previous script
-
-    # Example alpha text (normally from LLM)
-    example_alpha_text = """
-    α1 = Return_5D + 0.5 × (AAPL_Sentiment - MSFT_Sentiment)
-    α2 = (close - SMA_20) / SMA_20
-    α3 = RSI / 100 - 0.5
-    α4 = (MACD - MACD_Signal) / close
-    α5 = Volatility_20D × (AAPL_Sentiment - 0.5)
-    """
-
-    # Example dataframe (you would load this from your data)
-    # comprehensive_df = pd.read_csv('stock_data.csv')
-
-    # Train the model
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # model, metrics, scalers = train_stock_predictor(
-    #     ticker='AAPL',
-    #     company_name='Apple Inc.',
-    #     comprehensive_df=comprehensive_df,
-    #     alpha_text=example_alpha_text,
-    #     window_size=5,
-    #     num_epochs=50,
-    #     device=device
-    # )
-
-    print("LSTM Stock Predictor Module Ready!")
-    print("Use train_stock_predictor() to train models for your stocks.")
