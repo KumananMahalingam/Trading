@@ -3,6 +3,7 @@ from openpyxl import Workbook, load_workbook
 import os
 from collections import defaultdict, Counter
 import json
+import re
 
 
 def save_all_data_to_excel(
@@ -33,13 +34,9 @@ def save_all_data_to_excel(
 
     wb = Workbook()
 
-    # Remove default sheet
     if 'Sheet' in wb.sheetnames:
         wb.remove(wb['Sheet'])
 
-    # ========================================================================
-    # SHEET 1: Daily Sentiment
-    # ========================================================================
     print("  Saving daily sentiment data...")
     sentiment_sheet = wb.create_sheet("Daily Sentiment")
     sentiment_sheet.append(["Ticker", "Date", "Average Sentiment", "Article Count", "Raw Scores"])
@@ -55,11 +52,7 @@ def save_all_data_to_excel(
             sentiment_sheet.append([ticker, date, avg_sentiment, article_count, raw_scores_json])
             sentiment_count += 1
 
-    print(f"    ✓ Saved {sentiment_count} sentiment records")
-
-    # ========================================================================
-    # SHEET 2: Stock Price Data
-    # ========================================================================
+    print(f"    Saved {sentiment_count} sentiment records")
     print("  Saving stock price data...")
     stock_sheet = wb.create_sheet("Stock Prices")
     stock_sheet.append(["Ticker", "Date", "Open", "High", "Low", "Close", "Volume"])
@@ -78,11 +71,8 @@ def save_all_data_to_excel(
             ])
             stock_count += 1
 
-    print(f"    ✓ Saved {stock_count} stock price records")
+    print(f"    Saved {stock_count} stock price records")
 
-    # ========================================================================
-    # SHEET 3: Related Companies
-    # ========================================================================
     print("  Saving related companies...")
     related_sheet = wb.create_sheet("Related Companies")
     related_sheet.append(["Primary Ticker", "Related Ticker", "Mention Count", "Rank"])
@@ -90,17 +80,12 @@ def save_all_data_to_excel(
     for ticker, mentions in validated_mentions.items():
         for rank, (company_str, count) in enumerate(mentions.most_common(20), 1):
             # Extract ticker from "Company Name (TICKER)" format
-            import re
             match = re.search(r'\(([A-Z]+)\)', company_str)
             if match:
                 related_ticker = match.group(1)
                 related_sheet.append([ticker, related_ticker, count, rank])
 
-    print(f"    ✓ Saved related companies for {len(validated_mentions)} tickers")
-
-    # ========================================================================
-    # SHEET 4: Alpha Formulas
-    # ========================================================================
+    print(f"    Saved related companies for {len(validated_mentions)} tickers")
     print("  Saving alpha formulas...")
     alpha_sheet = wb.create_sheet("Alpha Formulas")
     alpha_sheet.append(["Ticker", "Related Companies", "Alpha Text"])
@@ -109,11 +94,7 @@ def save_all_data_to_excel(
         related = ", ".join(all_related_companies.get(ticker, []))
         alpha_sheet.append([ticker, related, alpha_text])
 
-    print(f"    ✓ Saved alpha formulas for {len(alpha_texts)} tickers")
-
-    # ========================================================================
-    # SHEET 5: Model Results
-    # ========================================================================
+    print(f"    Saved alpha formulas for {len(alpha_texts)} tickers")
     print("  Saving model results...")
     results_sheet = wb.create_sheet("Model Results")
     results_sheet.append([
@@ -134,11 +115,8 @@ def save_all_data_to_excel(
                 metrics.get('Within 1% Accuracy', 0)
             ])
 
-    print(f"    ✓ Saved model results for {len(trained_models) if trained_models else 0} models")
+    print(f"    Saved model results for {len(trained_models) if trained_models else 0} models")
 
-    # ========================================================================
-    # SHEET 6: Metadata
-    # ========================================================================
     print("  Saving metadata...")
     meta_sheet = wb.create_sheet("Metadata")
     meta_sheet.append(["Key", "Value"])
@@ -150,7 +128,6 @@ def save_all_data_to_excel(
     from datetime import datetime
     meta_sheet.append(["Last Updated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 
-    # Save workbook
     wb.save(filename)
     print(f"\n✓ All data saved to {filename}")
     print(f"{'='*80}\n")
@@ -176,7 +153,6 @@ def load_all_data_from_excel(filename):
     try:
         wb = load_workbook(filename, read_only=True)
 
-        # Check if all required sheets exist
         required_sheets = ["Daily Sentiment", "Stock Prices", "Related Companies",
                           "Alpha Formulas", "Metadata"]
 
@@ -186,9 +162,6 @@ def load_all_data_from_excel(filename):
             wb.close()
             return None, None, None, None, None, False
 
-        # ====================================================================
-        # LOAD Daily Sentiment
-        # ====================================================================
         print("  Loading daily sentiment data...")
         daily_sentiments = defaultdict(lambda: defaultdict(list))
 
@@ -204,15 +177,11 @@ def load_all_data_from_excel(filename):
                         scores = json.loads(raw_scores_json)
                         daily_sentiments[ticker][date] = scores
                     except:
-                        # Fallback: use average
                         scores = [avg_sentiment] * int(article_count)
                         daily_sentiments[ticker][date] = scores
 
-        print(f"    ✓ Loaded sentiment for {len(daily_sentiments)} tickers")
+        print(f"    Loaded sentiment for {len(daily_sentiments)} tickers")
 
-        # ====================================================================
-        # LOAD Stock Prices
-        # ====================================================================
         print("  Loading stock price data...")
         stock_dataframes = {}
 
@@ -240,11 +209,8 @@ def load_all_data_from_excel(filename):
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
             stock_dataframes[ticker] = df
 
-        print(f"    ✓ Loaded stock data for {len(stock_dataframes)} tickers")
+        print(f"    Loaded stock data for {len(stock_dataframes)} tickers")
 
-        # ====================================================================
-        # LOAD Related Companies
-        # ====================================================================
         print("  Loading related companies...")
         validated_mentions = defaultdict(Counter)
         all_related_companies = defaultdict(list)
@@ -256,7 +222,6 @@ def load_all_data_from_excel(filename):
             if len(row) >= 4:
                 primary_ticker, related_ticker, count, rank = row[:4]
                 if primary_ticker and related_ticker:
-                    # Reconstruct mentions
                     validated_mentions[primary_ticker][f"({related_ticker})"] = count
 
                     # Build all_related_companies (top 5)
@@ -264,11 +229,8 @@ def load_all_data_from_excel(filename):
                         if related_ticker not in all_related_companies[primary_ticker]:
                             all_related_companies[primary_ticker].append(related_ticker)
 
-        print(f"    ✓ Loaded related companies for {len(all_related_companies)} tickers")
+        print(f"    Loaded related companies for {len(all_related_companies)} tickers")
 
-        # ====================================================================
-        # LOAD Alpha Formulas
-        # ====================================================================
         print("  Loading alpha formulas...")
         alpha_texts = {}
 
@@ -316,7 +278,6 @@ def check_data_completeness(filename, required_tickers):
     try:
         wb = load_workbook(filename, read_only=True)
 
-        # Check metadata sheet
         if "Metadata" not in wb.sheetnames:
             wb.close()
             return False
@@ -332,7 +293,6 @@ def check_data_completeness(filename, required_tickers):
                 if not data_complete:
                     return False
 
-        # Check if all required tickers have data
         if "Stock Prices" not in wb.sheetnames:
             wb.close()
             return False
@@ -369,7 +329,7 @@ def display_data_summary(daily_sentiments, stock_dataframes, all_related_compani
     print(f"{'='*80}")
 
     print(f"\nSentiment Data:")
-    for ticker in sorted(daily_sentiments.keys())[:10]:  # Show first 10
+    for ticker in sorted(daily_sentiments.keys())[:10]:
         days = len(daily_sentiments[ticker])
         print(f"  {ticker}: {days} days")
     if len(daily_sentiments) > 10:

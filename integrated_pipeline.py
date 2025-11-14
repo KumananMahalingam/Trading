@@ -13,14 +13,10 @@ from groq import Groq
 import torch
 import os
 import numpy as np
-
-# Import modules
 from lstm_predictor import train_stock_predictor
 from data_storage import (
     save_all_data_to_excel,
     load_all_data_from_excel,
-    check_data_completeness,
-    display_data_summary
 )
 
 client = RESTClient(secret_key.API_KEY)
@@ -44,16 +40,8 @@ COMPANY_ALIASES = {
     "AMAZON": ["AMZN"]
 }
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
 DATA_FILE = "stock_analysis_complete.xlsx"
 FORCE_REFETCH = False  # Set to True to force re-fetching all data
-
-# ============================================================================
-# HELPER FUNCTIONS (same as before)
-# ============================================================================
 
 def load_company_tickers_json(file_path="company_tickers.json"):
     try:
@@ -213,7 +201,6 @@ def calculate_technical_indicators(df):
     if df.empty:
         return df
 
-    # Moving Averages
     df['SMA_5'] = df['close'].rolling(window=5).mean()
     df['SMA_10'] = df['close'].rolling(window=10).mean()
     df['SMA_20'] = df['close'].rolling(window=20).mean()
@@ -223,19 +210,16 @@ def calculate_technical_indicators(df):
     df['EMA_12'] = df['close'].ewm(span=12, adjust=False).mean()
     df['EMA_26'] = df['close'].ewm(span=26, adjust=False).mean()
 
-    # MACD
     df['MACD'] = df['EMA_12'] - df['EMA_26']
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # Bollinger Bands
     df['BB_Middle'] = df['close'].rolling(window=20).mean()
     bb_std = df['close'].rolling(window=20).std()
     df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
@@ -243,27 +227,22 @@ def calculate_technical_indicators(df):
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
     df['BB_Position'] = (df['close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
 
-    # Returns
     df['Return_1D'] = df['close'].pct_change(1)
     df['Return_5D'] = df['close'].pct_change(5)
     df['Return_20D'] = df['close'].pct_change(20)
     df['Return_60D'] = df['close'].pct_change(60)
 
-    # Volatility
     df['Volatility_5D'] = df['Return_1D'].rolling(window=5).std()
     df['Volatility_20D'] = df['Return_1D'].rolling(window=20).std()
     df['Volatility_60D'] = df['Return_1D'].rolling(window=60).std()
 
-    # Volume indicators
     df['Volume_SMA_20'] = df['volume'].rolling(window=20).mean()
     df['Volume_Ratio'] = df['volume'] / df['Volume_SMA_20']
 
-    # Price momentum
     df['Momentum_5'] = df['close'] - df['close'].shift(5)
     df['Momentum_10'] = df['close'] - df['close'].shift(10)
     df['Momentum_20'] = df['close'] - df['close'].shift(20)
 
-    # Rate of change
     df['ROC_5'] = ((df['close'] - df['close'].shift(5)) / df['close'].shift(5)) * 100
     df['ROC_10'] = ((df['close'] - df['close'].shift(10)) / df['close'].shift(10)) * 100
 
@@ -293,7 +272,7 @@ def calculate_technical_indicators(df):
     df['Stochastic_K'] = 100 * (df['close'] - low_14) / (high_14 - low_14)
     df['Stochastic_D'] = df['Stochastic_K'].rolling(3).mean()
 
-    # Williams %R
+    # Williams R
     df['Williams_R'] = -100 * (high_14 - df['close']) / (high_14 - low_14)
 
     # Trend strength (ADX)
@@ -308,21 +287,17 @@ def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_comp
 
     df = calculate_technical_indicators(stock_df.copy())
 
-    # Add sentiment
     sentiment_dict = {}
     for date, scores in daily_sentiments[ticker].items():
         sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
     df[f'{ticker}_Sentiment'] = df['date'].map(sentiment_dict).fillna(0)
 
-    # Add lagged sentiment
     df[f'{ticker}_Sentiment_Lag1'] = df[f'{ticker}_Sentiment'].shift(1)
     df[f'{ticker}_Sentiment_Lag5'] = df[f'{ticker}_Sentiment'].shift(5)
 
-    # Sentiment momentum
     df[f'{ticker}_Sentiment_Change'] = df[f'{ticker}_Sentiment'].diff()
     df[f'{ticker}_Sentiment_MA5'] = df[f'{ticker}_Sentiment'].rolling(5).mean()
 
-    # Related company sentiments
     for related_ticker in related_companies:
         if related_ticker in daily_sentiments:
             related_sentiment_dict = {}
@@ -330,7 +305,6 @@ def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_comp
                 related_sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
             df[f'{related_ticker}_Sentiment'] = df['date'].map(related_sentiment_dict).fillna(0)
 
-            # Sentiment divergence
             df[f'Sentiment_Div_{ticker}_{related_ticker}'] = \
                 df[f'{ticker}_Sentiment'] - df[f'{related_ticker}_Sentiment']
 
@@ -352,23 +326,19 @@ def generate_alphas_with_groq(ticker, company_name, comprehensive_df, related_co
     """
     print(f"\n  Generating alphas for {company_name} ({ticker}) using Groq LLM...")
 
-    # Prepare a sample of the dataframe (last 30 days to keep prompt manageable)
+    # Prepare a sample of the dataframe (last 30 days)
     sample_df = comprehensive_df.tail(30).copy()
 
-    # Convert to JSON format for the prompt
     df_json = sample_df.to_json(orient='records', date_format='iso', indent=2)
 
-    # Build list of available features
     available_features = list(sample_df.columns)
     stock_features = [col for col in available_features if col in ['close', 'open', 'high', 'low', 'volume', 'date']]
     technical_indicators = [col for col in available_features if any(ind in col.upper() for ind in
                            ['SMA', 'EMA', 'RSI', 'MACD', 'BB_', 'ATR', 'OBV', 'MFI', 'STOCHASTIC', 'WILLIAMS', 'ADX', 'ROC', 'MOMENTUM', 'VOLATILITY', 'RETURN'])]
     sentiment_features = [col for col in available_features if 'Sentiment' in col]
 
-    # Build related companies string
     related_str = ", ".join(related_companies) if related_companies else "None available"
 
-    # Construct the prompt
     prompt = f"""Task: Generate Predictive Alphas for {company_name}'s Stock Prices
 
 Objective: Generate 5 formulaic alpha signals to predict {company_name} ({ticker}) stock prices using:
@@ -424,13 +394,12 @@ IMPORTANT:
 - Keep formulas relatively simple (2-4 terms each)
 """
 
-    # Call Groq API with retries
     for attempt in range(max_retries):
         try:
             print(f"    Attempt {attempt + 1}/{max_retries}...")
 
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",  # or "mixtral-8x7b-32768"
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {
                         "role": "system",
@@ -448,7 +417,6 @@ IMPORTANT:
 
             alpha_text = response.choices[0].message.content.strip()
 
-            # Basic validation - check if we got 5 alphas
             alpha_lines = [line for line in alpha_text.split('\n') if line.strip().startswith('α')]
 
             if len(alpha_lines) >= 5:
@@ -465,7 +433,7 @@ IMPORTANT:
                 print(f"    Falling back to simple alphas for {ticker}")
                 return generate_simple_alphas(ticker)
 
-    # Fallback if all retries failed
+
     return generate_simple_alphas(ticker)
 
 def fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12):
@@ -544,7 +512,6 @@ def check_essential_data_only(file_path, tickers):
         wb = load_workbook(file_path, read_only=True)
         sheet_names = wb.sheetnames
 
-        # Check for essential sheets only
         if 'Daily Sentiment' not in sheet_names:
             print("  Missing: Daily Sentiment sheet")
             wb.close()
@@ -560,12 +527,10 @@ def check_essential_data_only(file_path, tickers):
             wb.close()
             return False
 
-        # Quick validation that sheets have data
         sentiments_sheet = wb['Daily Sentiment']
         related_sheet = wb['Related Companies']
         stock_sheet = wb['Stock Prices']
 
-        # Check if sheets have headers + at least one data row
         sentiment_rows = list(sentiments_sheet.iter_rows(min_row=2, max_row=2, values_only=True))
         related_rows = list(related_sheet.iter_rows(min_row=2, max_row=2, values_only=True))
         stock_rows = list(stock_sheet.iter_rows(min_row=2, values_only=True))
@@ -585,7 +550,6 @@ def check_essential_data_only(file_path, tickers):
             wb.close()
             return False
 
-        # Check all required tickers exist in the Stock Prices sheet
         tickers_in_file = set()
         for row in stock_rows:
             if len(row) >= 1 and row[0]:
@@ -607,20 +571,12 @@ def check_essential_data_only(file_path, tickers):
         traceback.print_exc()
         return False
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
 print("="*80)
 print("IMPROVED STOCK PRICE PREDICTION PIPELINE (WITH DATA CACHING)")
 print("="*80)
 
 print("\nLoading company tickers JSON...")
 company_lookups = load_company_tickers_json("company_tickers.json")
-
-# ========================================================================
-# CHECK IF WE CAN LOAD FROM CACHE
-# ========================================================================
 
 load_from_cache = False
 
@@ -634,9 +590,7 @@ if not FORCE_REFETCH and check_essential_data_only(DATA_FILE, list(companies.key
         load_from_cache = True
 
 if load_from_cache:
-    # ====================================================================
-    # LOAD ALL DATA FROM EXCEL
-    # ====================================================================
+
     (daily_sentiments, stock_dataframes, validated_mentions,
      all_related_companies, alpha_texts, success) = load_all_data_from_excel(DATA_FILE)
 
@@ -650,7 +604,6 @@ if load_from_cache:
         print(f"  - Related companies for {len(all_related_companies)} tickers")
         print(f"  - Alpha formulas for {len(alpha_texts)} tickers")
 
-        # ✅ USE CACHED ALPHAS - Only regenerate if missing
         print("\n" + "="*80)
         print("CHECKING ALPHA FORMULAS")
         print("="*80)
@@ -663,7 +616,6 @@ if load_from_cache:
             else:
                 print(f"  ✓ Loaded alpha formula for {ticker}")
 
-        # Only regenerate missing alphas
         if missing_alphas:
             print(f"\n{'='*80}")
             print(f"GENERATING MISSING ALPHAS FOR {len(missing_alphas)} TICKERS")
@@ -682,7 +634,6 @@ if load_from_cache:
                 stock_df = stock_dataframes[ticker]
                 related_companies = all_related_companies.get(ticker, [])
 
-                # Prepare comprehensive dataframe
                 comprehensive_df = prepare_dataframe_for_alpha(
                     ticker,
                     stock_df,
@@ -695,7 +646,6 @@ if load_from_cache:
                     alpha_texts[ticker] = generate_simple_alphas(ticker)
                     continue
 
-                # Generate alphas using Groq
                 alpha_text = generate_alphas_with_groq(
                     ticker,
                     name,
@@ -709,10 +659,8 @@ if load_from_cache:
                 print(alpha_text)
                 print()
 
-                # Small delay to avoid rate limiting
                 time.sleep(2)
 
-            # Save updated alphas to cache
             save_all_data_to_excel(
                 DATA_FILE,
                 daily_sentiments,
@@ -725,9 +673,6 @@ if load_from_cache:
             print(f"\n✓ All alpha formulas loaded from cache - no API calls needed!")
 
 if not load_from_cache:
-    # ====================================================================
-    # FETCH ALL DATA (ORIGINAL PIPELINE)
-    # ====================================================================
 
     start_date = datetime(2023, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
     end_date   = datetime(2025, 9, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -826,10 +771,6 @@ if not load_from_cache:
             stock_dataframes[ticker] = stock_df
         time.sleep(2)
 
-    # ====================================================================
-    # PHASE 3.5: GENERATING ALPHAS WITH GROQ LLM (ONCE!)
-    # ====================================================================
-
     print("\n" + "="*80)
     print("PHASE 3.5: GENERATING ALPHAS WITH GROQ LLM")
     print("="*80)
@@ -845,7 +786,6 @@ if not load_from_cache:
         stock_df = stock_dataframes[ticker]
         related_companies = all_related_companies.get(ticker, [])
 
-        # Prepare comprehensive dataframe
         comprehensive_df = prepare_dataframe_for_alpha(
             ticker,
             stock_df,
@@ -858,7 +798,6 @@ if not load_from_cache:
             alpha_texts[ticker] = generate_simple_alphas(ticker)
             continue
 
-        # Generate alphas using Groq
         alpha_text = generate_alphas_with_groq(
             ticker,
             name,
@@ -872,12 +811,7 @@ if not load_from_cache:
         print(alpha_text)
         print()
 
-        # Small delay to avoid rate limiting
-        time.sleep(2)
-
-    # ====================================================================
-    # SAVE ALL DATA TO EXCEL
-    # ====================================================================
+    time.sleep(2)
 
     save_all_data_to_excel(
         DATA_FILE,
@@ -887,10 +821,6 @@ if not load_from_cache:
         all_related_companies,
         alpha_texts
     )
-
-# ========================================================================
-# PHASE 4: TRAINING (ALWAYS RUNS)
-# ========================================================================
 
 print("\n" + "="*80)
 print("PHASE 4: TRAINING IMPROVED PYTORCH LSTM MODELS")
@@ -951,10 +881,6 @@ for ticker, name in companies.items():
     print(f"\nWaiting 5 seconds before next model...")
     time.sleep(5)
 
-# ========================================================================
-# UPDATE EXCEL WITH TRAINING RESULTS
-# ========================================================================
-
 if trained_models:
     print("\nUpdating Excel file with training results...")
     save_all_data_to_excel(
@@ -966,10 +892,6 @@ if trained_models:
         alpha_texts,
         trained_models
     )
-
-# ========================================================================
-# FINAL SUMMARY
-# ========================================================================
 
 print("\n" + "="*80)
 print("PIPELINE COMPLETE!")
