@@ -18,6 +18,11 @@ from data_storage import (
     save_all_data_to_excel,
     load_all_data_from_excel,
 )
+from alternative_data_sources import (
+    fetch_fred_data,
+    fetch_all_alternative_data,
+    add_alternative_features_to_df
+)
 
 client = RESTClient(secret_key.API_KEY)
 groq_client = Groq(api_key=secret_key.GROQ_API_KEY)
@@ -280,7 +285,7 @@ def calculate_technical_indicators(df):
 
     return df
 
-def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_companies):
+def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_companies, alternative_data=None, economic_data=None):
     """ENHANCED: Prepare dataframe with sentiment lag features"""
     if stock_df.empty:
         return None
@@ -307,6 +312,15 @@ def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_comp
 
             df[f'Sentiment_Div_{ticker}_{related_ticker}'] = \
                 df[f'{ticker}_Sentiment'] - df[f'{related_ticker}_Sentiment']
+
+    if alternative_data and ticker in alternative_data:
+        from alternative_data_sources import add_alternative_features_to_df
+        df = add_alternative_features_to_df(
+            df, ticker,
+            economic_data if economic_data is not None else pd.DataFrame(),
+            alternative_data[ticker]['sec'],
+            alternative_data[ticker]['earnings']
+        )
 
     return df
 
@@ -486,7 +500,7 @@ def fetch_sentiment_for_ticker(ticker, start_date, end_date, daily_sentiments):
     """Fetch news and compute sentiment for a specific ticker"""
     print(f"  Fetching sentiment data for {ticker}...")
 
-    news_articles = fetch_news(ticker, start_date, end_date, batch_size=500, sleep_time=12)
+    news_articles = fetch_news(ticker, start_date, end_date, batch_size=1000, sleep_time=12)
 
     if not news_articles:
         print(f"    No news articles found for {ticker}")
@@ -590,7 +604,6 @@ if not FORCE_REFETCH and check_essential_data_only(DATA_FILE, list(companies.key
         load_from_cache = True
 
 if load_from_cache:
-
     (daily_sentiments, stock_dataframes, validated_mentions,
      all_related_companies, alpha_texts, success) = load_all_data_from_excel(DATA_FILE)
 
@@ -604,6 +617,61 @@ if load_from_cache:
         print(f"  - Related companies for {len(all_related_companies)} tickers")
         print(f"  - Alpha formulas for {len(alpha_texts)} tickers")
 
+        # ============ NEW: FETCH ECONOMIC DATA EVEN WHEN LOADING FROM CACHE ============
+        print("\n" + "="*80)
+        print("FETCHING ECONOMIC & FUNDAMENTAL DATA (FRED + SEC + EARNINGS)")
+        print("="*80)
+
+        # Extract date range from cached stock data
+        all_dates = []
+        for ticker, df in stock_dataframes.items():
+            if not df.empty and 'date' in df.columns:
+                all_dates.extend(df['date'].tolist())
+
+        if all_dates:
+            full_start_date = min(all_dates)
+            full_end_date = max(all_dates)
+            print(f"Date range from cached data: {full_start_date} to {full_end_date}")
+
+            # Fetch FRED economic data (takes ~1 minute)
+            print("\nFetching FRED economic indicators...")
+            economic_data = fetch_fred_data(full_start_date, full_end_date)
+
+            # Fetch SEC filings and earnings for each ticker
+            print("\nFetching SEC filings and earnings data...")
+            all_alternative_data = {}
+
+            for ticker, name in companies.items():
+                print(f"\n{ticker} ({name}):")
+
+                try:
+                    sec_sentiment, earnings_sentiment = fetch_all_alternative_data(
+                        ticker,
+                        full_start_date,
+                        full_end_date
+                    )
+
+                    all_alternative_data[ticker] = {
+                        'sec': sec_sentiment,
+                        'earnings': earnings_sentiment
+                    }
+
+                    time.sleep(3)  # Rate limiting
+                except Exception as e:
+                    print(f"  ✗ Error fetching alternative data for {ticker}: {e}")
+                    all_alternative_data[ticker] = {
+                        'sec': {},
+                        'earnings': {}
+                    }
+
+            print("\n✓ Alternative data collection complete")
+        else:
+            print("\n⚠ Could not determine date range from cached data")
+            print("  Using empty economic data")
+            economic_data = pd.DataFrame()
+            all_alternative_data = {}
+
+        # Continue with alpha checking...
         print("\n" + "="*80)
         print("CHECKING ALPHA FORMULAS")
         print("="*80)
@@ -638,7 +706,9 @@ if load_from_cache:
                     ticker,
                     stock_df,
                     daily_sentiments,
-                    related_companies
+                    related_companies,
+                    alternative_data=all_alternative_data,
+                    economic_data=economic_data
                 )
 
                 if comprehensive_df is None or comprehensive_df.empty:
@@ -761,6 +831,40 @@ if not load_from_cache:
         time.sleep(15)
 
     print("\n" + "="*80)
+    print("FETCHING ECONOMIC & FUNDAMENTAL DATA")
+    print("="*80)
+
+    # Fetch economic data ONCE (shared across all tickers)
+    full_start_date = start_date[:10]
+    full_end_date = end_date[:10]
+
+    from alternative_data_sources import fetch_fred_data, fetch_all_alternative_data
+
+    economic_data = fetch_fred_data(full_start_date, full_end_date)
+
+    # Fetch SEC filings and earnings for each ticker
+    all_alternative_data = {}
+
+    for ticker, name in companies.items():
+        print(f"\n{ticker} ({name}):")
+
+        sec_sentiment, earnings_sentiment = fetch_all_alternative_data(
+            ticker,
+            full_start_date,
+            full_end_date
+        )
+
+        all_alternative_data[ticker] = {
+            'sec': sec_sentiment,
+            'earnings': earnings_sentiment
+        }
+
+        # Rate limiting between tickers
+        time.sleep(3)
+
+    print("\n✓ Alternative data collection complete")
+
+    print("\n" + "="*80)
     print("PHASE 3: FETCHING STOCK DATA")
     print("="*80)
 
@@ -790,7 +894,9 @@ if not load_from_cache:
             ticker,
             stock_df,
             daily_sentiments,
-            related_companies
+            related_companies,
+            alternative_data=all_alternative_data,  # NEW
+            economic_data=economic_data              # NEW
         )
 
         if comprehensive_df is None or comprehensive_df.empty:
@@ -847,7 +953,9 @@ for ticker, name in companies.items():
         ticker,
         stock_df,
         daily_sentiments,
-        related_companies
+        related_companies,
+        alternative_data=all_alternative_data,  # NEW
+        economic_data=economic_data              # NEW
     )
 
     if comprehensive_df is None or comprehensive_df.empty:
