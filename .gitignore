@@ -1,0 +1,5 @@
+sec-edgar-filings/
+*.pth
+*.xlsx
+__pycache__/
+*.pyc

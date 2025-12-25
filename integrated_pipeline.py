@@ -13,7 +13,7 @@ from groq import Groq
 import torch
 import os
 import numpy as np
-from lstm_predictor import train_stock_predictor
+from lstm_predictor import train_stock_predictor, train_ensemble
 from data_storage import (
     save_all_data_to_excel,
     load_all_data_from_excel,
@@ -31,22 +31,23 @@ sia = SentimentIntensityAnalyzer()
 
 companies = {
     "AAPL": "Apple",
-    "JPM": "JPMorgan Chase & Co",
-    "PEP": "Pepsi",
-    "TM": "Toyota",
-    "AMZN": "Amazon"
+#    "JPM": "JPMorgan Chase & Co",
+#    "PEP": "Pepsi",
+#    "TM": "Toyota",
+#    "AMZN": "Amazon"
 }
 
 COMPANY_ALIASES = {
     "APPLE": ["AAPL"],
-    "JPMORGAN": ["JPM", "JPM.N"],
-    "PEPSI": ["PEP", "PEPSICO"],
-    "TOYOTA": ["TM", "TYO"],
-    "AMAZON": ["AMZN"]
+#    "JPMORGAN": ["JPM", "JPM.N"],
+#    "PEPSI": ["PEP", "PEPSICO"],
+#    "TOYOTA": ["TM", "TYO"],
+#    "AMAZON": ["AMZN"]
 }
 
 DATA_FILE = "stock_analysis_complete.xlsx"
 FORCE_REFETCH = False  # Set to True to force re-fetching all data
+FORCE_REGENERATE_ALPHAS = True
 
 def load_company_tickers_json(file_path="company_tickers.json"):
     try:
@@ -336,77 +337,188 @@ def generate_simple_alphas(ticker):
 
 def generate_alphas_with_groq(ticker, company_name, comprehensive_df, related_companies, max_retries=3):
     """
-    Generate predictive alphas using Groq LLM based on available data
+    Generate predictive alphas using Groq LLM with enhanced prompt
     """
     print(f"\n  Generating alphas for {company_name} ({ticker}) using Groq LLM...")
 
-    # Prepare a sample of the dataframe (last 30 days)
-    sample_df = comprehensive_df.tail(30).copy()
+    cutoff_idx = int(len(comprehensive_df) * 0.8)
+    sample_df = comprehensive_df.iloc[:cutoff_idx].tail(20).copy()  # Reduced to 20 days to fit token limit
 
-    df_json = sample_df.to_json(orient='records', date_format='iso', indent=2)
+    # Select only most important columns to reduce token usage
+    important_cols = ['date', 'close', 'volume']
+
+    tech_cols = [col for col in sample_df.columns if any(ind in col for ind in
+                ['RSI', 'MACD', 'SMA_20', 'SMA_50', 'EMA_12', 'EMA_26', 'ATR',
+                 'BB_Upper', 'BB_Lower', 'Return_5D', 'Return_20D', 'Volatility_20D', 'Volume_Ratio'])]
+    important_cols.extend(tech_cols)
+
+    sentiment_cols = [col for col in sample_df.columns if 'Sentiment' in col]
+    important_cols.extend(sentiment_cols)
+
+    econ_cols = [col for col in sample_df.columns if any(ind in col for ind in
+                ['VIX', 'Fed_Funds_Rate', 'Treasury_10Y', 'CPI', 'Unemployment_Rate'])]
+    important_cols.extend(econ_cols)
+
+    alt_cols = [col for col in sample_df.columns if any(ind in col for ind in
+               ['SEC_Sentiment', 'Earnings', 'Days_Since_Earnings'])]
+    important_cols.extend(alt_cols)
+
+    important_cols = list(dict.fromkeys(important_cols))  # Remove duplicates while preserving order
+    sample_df = sample_df[[col for col in important_cols if col in sample_df.columns]]
 
     available_features = list(sample_df.columns)
+
+    # Categorize features with counts
     stock_features = [col for col in available_features if col in ['close', 'open', 'high', 'low', 'volume', 'date']]
+
     technical_indicators = [col for col in available_features if any(ind in col.upper() for ind in
-                           ['SMA', 'EMA', 'RSI', 'MACD', 'BB_', 'ATR', 'OBV', 'MFI', 'STOCHASTIC', 'WILLIAMS', 'ADX', 'ROC', 'MOMENTUM', 'VOLATILITY', 'RETURN'])]
+                           ['SMA', 'EMA', 'RSI', 'MACD', 'BB_', 'ATR', 'OBV', 'MFI', 'STOCHASTIC',
+                            'WILLIAMS', 'ADX', 'ROC', 'MOMENTUM', 'VOLATILITY', 'RETURN'])]
+
     sentiment_features = [col for col in available_features if 'Sentiment' in col]
 
-    related_str = ", ".join(related_companies) if related_companies else "None available"
+    target_sentiment = [col for col in sentiment_features if col.startswith(f'{ticker}_')]
+    related_sentiment = [col for col in sentiment_features if not col.startswith(f'{ticker}_') and not col.startswith('Sentiment_Div')]
+    sentiment_divergence = [col for col in sentiment_features if col.startswith('Sentiment_Div')]
 
-    prompt = f"""Task: Generate Predictive Alphas for {company_name}'s Stock Prices
+    economic_features = [col for col in available_features if any(ind in col for ind in
+                        ['GDP', 'CPI', 'Unemployment', 'Fed_Funds', 'Treasury', 'VIX', 'Oil_Price',
+                         'Gold_Price', 'Consumer_Sentiment', 'Retail_Sales'])]
 
-Objective: Generate 5 formulaic alpha signals to predict {company_name} ({ticker}) stock prices using:
-1. Stock features (e.g., close, open, high, low, volume)
-2. Technical indicators (e.g., RSI, moving averages, MACD, Bollinger Bands)
-3. Sentiment data for the target company and related companies
+    alternative_features = [col for col in available_features if any(ind in col for ind in
+                           ['SEC', 'Earnings', 'Days_Since_Earnings'])]
 
-Input Data:
-A pandas DataFrame with rows representing trading days and the following columns:
+    target_col = ticker + '_Sentiment'
+    stats_context = ""
+    if target_col in sample_df.columns:
+        sent_mean = sample_df[target_col].mean()
+        sent_std = sample_df[target_col].std()
+        sent_min = sample_df[target_col].min()
+        sent_max = sample_df[target_col].max()
 
-Stock Features: {', '.join(stock_features)}
-Technical Indicators: {', '.join(technical_indicators[:20])}{'...' if len(technical_indicators) > 20 else ''}
-Sentiment Features: {', '.join(sentiment_features)}
+        if 'Volatility_20D' in sample_df.columns:
+            vol_20d_val = sample_df['Volatility_20D'].iloc[-1]
+            vol_20d_str = f"{vol_20d_val:.4f}"
+        else:
+            vol_20d_str = 'N/A'
 
-Related Companies: {related_str}
+        if 'Return_20D' in sample_df.columns:
+            ret_20d_val = sample_df['Return_20D'].iloc[-1]
+            ret_20d_str = f"{ret_20d_val:.4f}"
+        else:
+            ret_20d_str = 'N/A'
 
-Sample Data (last 30 days):
-{df_json}
-
-Requirements:
-1. Alpha Formulation: Propose exactly 5 formulaic alphas combining:
-   - Stock features and technical indicators
-   - Cross-company sentiment divergences (if available)
-   - Momentum and trend signals
-   - Volatility-adjusted returns
-
-2. Feature Engineering Considerations:
-   - Use normalized inputs where appropriate
-   - Combine multiple timeframes (short-term vs long-term signals)
-   - Leverage sentiment divergence between {ticker} and related companies
-   - Consider mean-reversion and momentum strategies
-
-3. Output Format:
-   Return ONLY the alpha formulas in this exact format (no explanations, no markdown):
-
-α1 = <formula using column names exactly as provided>
-α2 = <formula using column names exactly as provided>
-α3 = <formula using column names exactly as provided>
-α4 = <formula using column names exactly as provided>
-α5 = <formula using column names exactly as provided>
-
-Example Alphas (DO NOT copy these, generate new ones based on the actual data):
-α1 = Return_5D + 0.5 * {ticker}_Sentiment
-α2 = (RSI - 50) / 50 + 0.3 * {ticker}_Sentiment_Change
-α3 = MACD_Hist / ATR
-α4 = (close - SMA_20) / SMA_20 * (1 + {ticker}_Sentiment_MA5)
-α5 = Return_20D * (Volume_Ratio - 1)
-
-IMPORTANT:
-- Use ONLY column names that exist in the provided data
-- Formulas must be valid Python expressions
-- Avoid division by zero (use indicators that are non-zero)
-- Keep formulas relatively simple (2-4 terms each)
+        stats_context = f"""
+Statistical Context:
+- {ticker} Sentiment: Mean={sent_mean:.3f}, Std={sent_std:.3f}, Range=[{sent_min:.3f}, {sent_max:.3f}]
+- Recent volatility (20D): {vol_20d_str}
+- Recent return (20D): {ret_20d_str}
 """
+
+    related_str = "None available"
+    if related_companies:
+        related_with_overlap = []
+        for rel_ticker in related_companies:
+            if f'{rel_ticker}_Sentiment' in sample_df.columns:
+                related_with_overlap.append(f"{rel_ticker} (sentiment available)")
+            else:
+                related_with_overlap.append(f"{rel_ticker} (no sentiment)")
+        related_str = ", ".join(related_with_overlap)
+
+    df_summary = f"""
+Date Range: {sample_df['date'].iloc[0]} to {sample_df['date'].iloc[-1]} ({len(sample_df)} days)
+
+Recent Values (last 5 days):
+{sample_df.tail(5).to_string(index=False, max_cols=10)}
+
+Feature Statistics:
+{sample_df.describe().loc[['mean', 'std', 'min', 'max']].to_string()}
+"""
+
+    example_alpha_1 = f"Sentiment_Div_{ticker}_MSFT / (Volatility_20D + 1e-8)"
+    example_alpha_2 = f"(RSI - 50) / 50 + 0.3 * {ticker}_Sentiment_MA5"
+    example_alpha_3 = f"(MACD_Hist / ATR) * (1 + {ticker}_Sentiment_Change)"
+    example_alpha_4 = f"(SMA_5 - SMA_50) / close * (1 - Unemployment_Rate / 10)"
+    example_alpha_5 = f"Return_20D * Volume_Ratio * (1 + {ticker}_Days_Since_Earnings / 90)"
+
+    sentiment_example_features = f"{ticker}_Sentiment_MA5, {ticker}_Sentiment_Lag5"
+
+    prompt = f"""You are a quantitative finance expert designing predictive alpha factors for algorithmic trading.
+
+TASK: Generate 5 formulaic alpha signals to predict {company_name} ({ticker}) stock price movements.
+
+DATA AVAILABLE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. STOCK FEATURES ({len(stock_features)}):
+   {', '.join(stock_features)}
+
+2. TECHNICAL INDICATORS ({len(technical_indicators)}):
+   Available: RSI, MACD, SMA (5/10/20/50/200), EMA (12/26), BB, ATR, Volume_Ratio, Returns, Volatility
+
+3. SENTIMENT FEATURES ({len(sentiment_features)}):
+   Target: {', '.join(target_sentiment[:5])}
+   Related: {', '.join(related_sentiment[:5])}{'...' if len(related_sentiment) > 5 else ''}
+   Divergences: {len(sentiment_divergence)} available
+
+4. ECONOMIC INDICATORS ({len(economic_features)}):
+   Available: {', '.join(economic_features[:10])}{'...' if len(economic_features) > 10 else ''}
+
+5. ALTERNATIVE DATA ({len(alternative_features)}):
+   {', '.join(alternative_features)}
+
+RELATED COMPANIES: {related_str}
+
+{stats_context}
+
+SAMPLE DATA (Last 20 trading days - summary):
+{df_summary}
+
+ALPHA GENERATION REQUIREMENTS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Generate exactly 5 diverse alpha formulas following these guidelines:
+
+1. UTILIZE MULTIPLE DATA SOURCES:
+   - α1: Focus on CROSS-COMPANY SENTIMENT DIVERGENCE (use Sentiment_Div features or create divergences)
+   - α2: Combine TECHNICAL INDICATORS with TARGET SENTIMENT
+   - α3: Use MOMENTUM + VOLATILITY signals (trend-following)
+   - α4: Incorporate ECONOMIC INDICATORS + stock technicals
+   - α5: Alternative data fusion (SEC sentiment, earnings events, or multi-timeframe technical)
+
+2. FEATURE ENGINEERING BEST PRACTICES:
+   ✓ Normalize by volatility (divide by ATR or Volatility_20D)
+   ✓ Use ratio features (e.g., Volume_Ratio, BB_Position)
+   ✓ Combine short-term and long-term signals (e.g., SMA_5 - SMA_50)
+   ✓ Leverage sentiment lags and moving averages (e.g., {sentiment_example_features})
+   ✓ Create divergence signals between related metrics
+
+3. MATHEMATICAL VALIDITY:
+   ✓ Avoid division by zero (use ATR, std, or add small epsilon: 1e-8)
+   ✓ Keep formulas executable (2-6 terms per alpha)
+   ✓ Use ONLY column names from the data above
+   ✓ Ensure formulas return numeric values
+
+4. STRATEGIC DIVERSITY:
+   - Include at least ONE mean-reversion alpha (e.g., Bollinger Band position)
+   - Include at least ONE momentum/trend alpha (e.g., MACD, ROC)
+   - Include at least ONE sentiment-based alpha
+   - Avoid redundant alphas (don't repeat similar logic)
+
+OUTPUT FORMAT (respond with ONLY these 5 lines, no explanations):
+α1 = <formula>
+α2 = <formula>
+α3 = <formula>
+α4 = <formula>
+α5 = <formula>
+
+EXAMPLE ALPHAS (for reference only - generate NEW ones based on actual data):
+α1 = {example_alpha_1}
+α2 = {example_alpha_2}
+α3 = {example_alpha_3}
+α4 = {example_alpha_4}
+α5 = {example_alpha_5}
+
+NOW GENERATE 5 UNIQUE ALPHAS FOR {company_name}:"""
 
     for attempt in range(max_retries):
         try:
@@ -417,24 +529,40 @@ IMPORTANT:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a quantitative finance expert specializing in alpha generation for stock prediction models. Generate formulaic alphas using technical analysis and sentiment signals. Output ONLY the alpha formulas in the specified format, nothing else."
+                        "content": "You are a quantitative finance expert specializing in alpha generation. Output ONLY the 5 alpha formulas in the exact format specified. No preamble, no explanations, no markdown formatting."
                     },
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=0.7,
-                max_tokens=1000,
-                top_p=0.9
+                temperature=0.8,
+                max_tokens=1500,
+                top_p=0.95
             )
 
             alpha_text = response.choices[0].message.content.strip()
 
+            # Extract alpha lines
             alpha_lines = [line for line in alpha_text.split('\n') if line.strip().startswith('α')]
 
             if len(alpha_lines) >= 5:
                 print(f"    ✓ Successfully generated {len(alpha_lines)} alphas")
+
+                all_alphas_text = '\n'.join(alpha_lines)
+                features_used = set()
+
+                for feature_group in [sentiment_divergence, target_sentiment,
+                                     technical_indicators[:20], economic_features[:10]]:
+                    for feature in feature_group:
+                        if feature in all_alphas_text:
+                            features_used.add(feature)
+
+                print(f"    ✓ Alphas utilize {len(features_used)} unique features")
+
+                if any('Sentiment_Div' in line for line in alpha_lines):
+                    print(f"    ✓ Sentiment divergence signals included")
+
                 return alpha_text
             else:
                 print(f"    ⚠ Only got {len(alpha_lines)} alphas, retrying...")
@@ -446,7 +574,6 @@ IMPORTANT:
             else:
                 print(f"    Falling back to simple alphas for {ticker}")
                 return generate_simple_alphas(ticker)
-
 
     return generate_simple_alphas(ticker)
 
@@ -586,7 +713,7 @@ def check_essential_data_only(file_path, tickers):
         return False
 
 print("="*80)
-print("IMPROVED STOCK PRICE PREDICTION PIPELINE (WITH DATA CACHING)")
+print("IMPROVED STOCK PRICE PREDICTION PIPELINE")
 print("="*80)
 
 print("\nLoading company tickers JSON...")
@@ -617,12 +744,10 @@ if load_from_cache:
         print(f"  - Related companies for {len(all_related_companies)} tickers")
         print(f"  - Alpha formulas for {len(alpha_texts)} tickers")
 
-        # ============ NEW: FETCH ECONOMIC DATA EVEN WHEN LOADING FROM CACHE ============
         print("\n" + "="*80)
         print("FETCHING ECONOMIC & FUNDAMENTAL DATA (FRED + SEC + EARNINGS)")
         print("="*80)
 
-        # Extract date range from cached stock data
         all_dates = []
         for ticker, df in stock_dataframes.items():
             if not df.empty and 'date' in df.columns:
@@ -633,11 +758,9 @@ if load_from_cache:
             full_end_date = max(all_dates)
             print(f"Date range from cached data: {full_start_date} to {full_end_date}")
 
-            # Fetch FRED economic data (takes ~1 minute)
             print("\nFetching FRED economic indicators...")
             economic_data = fetch_fred_data(full_start_date, full_end_date)
 
-            # Fetch SEC filings and earnings for each ticker
             print("\nFetching SEC filings and earnings data...")
             all_alternative_data = {}
 
@@ -656,7 +779,7 @@ if load_from_cache:
                         'earnings': earnings_sentiment
                     }
 
-                    time.sleep(3)  # Rate limiting
+                    time.sleep(3)
                 except Exception as e:
                     print(f"  ✗ Error fetching alternative data for {ticker}: {e}")
                     all_alternative_data[ticker] = {
@@ -671,16 +794,16 @@ if load_from_cache:
             economic_data = pd.DataFrame()
             all_alternative_data = {}
 
-        # Continue with alpha checking...
         print("\n" + "="*80)
         print("CHECKING ALPHA FORMULAS")
         print("="*80)
 
         missing_alphas = []
         for ticker in companies.keys():
-            if ticker not in alpha_texts or not alpha_texts[ticker]:
+            if FORCE_REGENERATE_ALPHAS or ticker not in alpha_texts or not alpha_texts[ticker]:
                 missing_alphas.append(ticker)
-                print(f"  ⚠ Missing alpha formula for {ticker}")
+                if FORCE_REGENERATE_ALPHAS:
+                    print(f"  🔄 Forcing regeneration for {ticker}")
             else:
                 print(f"  ✓ Loaded alpha formula for {ticker}")
 
@@ -777,9 +900,6 @@ if not load_from_cache:
                         if is_valid:
                             validated_mentions[ticker][f"{official_name} ({mention_ticker})"] += 1
 
-        print(f"Waiting 65 seconds before next company...")
-        time.sleep(65)
-
     print("\n" + "="*80)
     print("PHASE 2: IDENTIFYING AND FETCHING RELATED COMPANY SENTIMENT")
     print("="*80)
@@ -834,7 +954,6 @@ if not load_from_cache:
     print("FETCHING ECONOMIC & FUNDAMENTAL DATA")
     print("="*80)
 
-    # Fetch economic data ONCE (shared across all tickers)
     full_start_date = start_date[:10]
     full_end_date = end_date[:10]
 
@@ -842,7 +961,6 @@ if not load_from_cache:
 
     economic_data = fetch_fred_data(full_start_date, full_end_date)
 
-    # Fetch SEC filings and earnings for each ticker
     all_alternative_data = {}
 
     for ticker, name in companies.items():
@@ -859,7 +977,6 @@ if not load_from_cache:
             'earnings': earnings_sentiment
         }
 
-        # Rate limiting between tickers
         time.sleep(3)
 
     print("\n✓ Alternative data collection complete")
@@ -895,8 +1012,8 @@ if not load_from_cache:
             stock_df,
             daily_sentiments,
             related_companies,
-            alternative_data=all_alternative_data,  # NEW
-            economic_data=economic_data              # NEW
+            alternative_data=all_alternative_data,
+            economic_data=economic_data
         )
 
         if comprehensive_df is None or comprehensive_df.empty:
@@ -929,7 +1046,7 @@ if not load_from_cache:
     )
 
 print("\n" + "="*80)
-print("PHASE 4: TRAINING IMPROVED PYTORCH LSTM MODELS")
+print("PHASE 4: TRAINING ENSEMBLE OF ENHANCED LSTM MODELS")
 print("="*80)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -937,13 +1054,15 @@ print(f"Using device: {device}")
 
 trained_models = {}
 
+successful_trainings = 0
+
 for ticker, name in companies.items():
     if ticker not in stock_dataframes or ticker not in alpha_texts:
         print(f"\nSkipping {ticker}: Missing data or alphas")
         continue
 
     print(f"\n{'='*80}")
-    print(f"TRAINING IMPROVED LSTM MODEL FOR {name} ({ticker})")
+    print(f"TRAINING ENSEMBLE FOR {name} ({ticker})")
     print(f"{'='*80}")
 
     stock_df = stock_dataframes[ticker]
@@ -954,40 +1073,92 @@ for ticker, name in companies.items():
         stock_df,
         daily_sentiments,
         related_companies,
-        alternative_data=all_alternative_data,  # NEW
-        economic_data=economic_data              # NEW
+        alternative_data=all_alternative_data,
+        economic_data=economic_data
     )
 
     if comprehensive_df is None or comprehensive_df.empty:
-        print(f"Failed to prepare data for {ticker}")
+        print(f"❌ Failed to prepare data for {ticker}")
         continue
 
     try:
         alpha_text = alpha_texts.get(ticker, generate_simple_alphas(ticker))
 
-        model, metrics, scalers = train_stock_predictor(
+        if len(comprehensive_df) < 100:
+            print(f"❌ Insufficient data for {ticker}: only {len(comprehensive_df)} rows")
+            print(f"   Need at least 100 rows for training")
+            continue
+
+        print(f"✓ Data ready: {len(comprehensive_df)} rows with {len(comprehensive_df.columns)} features")
+
+        print(f"\nAttempting ensemble training...")
+        ensemble, metrics, scalers = train_ensemble(
             ticker=ticker,
             company_name=name,
             comprehensive_df=comprehensive_df,
             alpha_text=alpha_text,
-            window_size=20,
-            num_epochs=100,
+            n_models=2,  # Start with 2 models
+            window_size=30,
             device=device
         )
 
-        if model is not None:
-            trained_models[ticker] = {'model': model, 'metrics': metrics, 'scalers': scalers}
-            torch.save(model.state_dict(), f'{ticker}_model.pth')
-            print(f"\n✓ Model saved as {ticker}_model.pth")
+        if ensemble is not None and metrics is not None:
+            trained_models[ticker] = {
+                'model': ensemble,
+                'metrics': metrics,
+                'scalers': scalers,
+                'type': 'ensemble'
+            }
+
+            torch.save(ensemble.state_dict(), f'{ticker}_ensemble.pth')
+            print(f"\n✅ Ensemble saved as {ticker}_ensemble.pth")
+
+            for i, model in enumerate(ensemble.models):
+                torch.save(model.state_dict(), f'{ticker}_model_{i}.pth')
+
+            successful_trainings += 1
+
+        else:
+            print(f"⚠ Ensemble training failed, trying single model...")
+
+            model, metrics, scalers = train_stock_predictor(
+                ticker=ticker,
+                company_name=name,
+                comprehensive_df=comprehensive_df,
+                alpha_text=alpha_text,
+                window_size=30,
+                num_epochs=100,
+                device=device
+            )
+
+            if model is not None and metrics is not None:
+                trained_models[ticker] = {
+                    'model': model,
+                    'metrics': metrics,
+                    'scalers': scalers,
+                    'type': 'single'
+                }
+                torch.save(model.state_dict(), f'{ticker}_model.pth')
+                print(f"✅ Single model saved as {ticker}_model.pth")
+                successful_trainings += 1
+            else:
+                print(f"❌ Single model training also failed for {ticker}")
 
     except Exception as e:
-        print(f"\n✗ Error training model for {ticker}: {e}")
+        print(f"\n❌ Error training model for {ticker}: {e}")
         import traceback
         traceback.print_exc()
+        print(f"Continuing with next ticker...")
         continue
 
-    print(f"\nWaiting 5 seconds before next model...")
-    time.sleep(5)
+    print(f"\nWaiting 3 seconds before next ticker...")
+    time.sleep(3)
+
+print(f"\n{'='*80}")
+print(f"TRAINING SUMMARY")
+print(f"{'='*80}")
+print(f"Successfully trained models: {successful_trainings}/{len(companies)}")
+print(f"Models in trained_models dict: {len(trained_models)}")
 
 if trained_models:
     print("\nUpdating Excel file with training results...")
@@ -1004,17 +1175,27 @@ if trained_models:
 print("\n" + "="*80)
 print("PIPELINE COMPLETE!")
 print("="*80)
-print(f"\nResults saved to: {DATA_FILE}")
-
 print(f"\nModels trained: {len(trained_models)}/{len(companies)}")
+
 for ticker in trained_models:
-    metrics = trained_models[ticker]['metrics']
-    mape_str = f"{metrics['MAPE']:.2f}" if metrics['MAPE'] != float('inf') else "N/A"
-    print(f"  {ticker}:")
-    print(f"    - RMSE: {metrics['RMSE']:.4f}")
-    print(f"    - MAPE: {mape_str}%")
-    print(f"    - Directional Accuracy: {metrics['Directional Accuracy']:.2f}%")
-    print(f"    - Within 1% Accuracy: {metrics['Within 1% Accuracy']:.2f}%")
+    model_data = trained_models[ticker]
+    model_type = model_data.get('type', 'single')
+    metrics = model_data['metrics']
+
+    print(f"\n  {ticker} ({model_type}):")
+    print(f"    - RMSE: {metrics.get('RMSE', 0):.6f}")
+    print(f"    - Directional Accuracy: {metrics.get('Directional Accuracy', 0):.2f}%")
+    print(f"    - Up Precision: {metrics.get('Up Precision', 0):.2f}%")
+    print(f"    - Down Precision: {metrics.get('Down Precision', 0):.2f}%")
+    print(f"    - Large Move Hit Rate: {metrics.get('Large Move Hit Rate', 0):.2f}%")
+    print(f"    - Sharpe Ratio: {metrics.get('Sharpe Ratio', 0):.3f}")
+    print(f"    - Win Rate: {metrics.get('Win Rate', 0):.2f}%")
+
+    if 'Avg Uncertainty' in metrics:
+        print(f"    - Avg Uncertainty: {metrics['Avg Uncertainty']:.6f}")
+
+    if model_type == 'ensemble':
+        print(f"    - Ensemble of {len(model_data['model'].models)} models")
 
 print(f"\n💾 All data cached in {DATA_FILE}")
 print(f"   Next run will load from cache automatically!")

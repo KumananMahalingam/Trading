@@ -7,87 +7,83 @@ import yfinance as yf
 sia = SentimentIntensityAnalyzer()
 
 
-# ============================================================================
-# FRED ECONOMIC DATA
-# ============================================================================
-
 def fetch_fred_data(start_date, end_date, series_ids=None):
 
     if series_ids is None:
         # Comprehensive economic indicators for trading models
         series_ids = {
             # GDP & Economic Growth
-            'GDP': 'GDP',                              # Gross Domestic Product
-            'GDPC1': 'Real_GDP',                       # Real GDP (inflation-adjusted)
-            'A191RL1Q225SBEA': 'GDP_Growth_Rate',      # GDP Growth Rate (QoQ)
+            'GDP': 'GDP',
+            'GDPC1': 'Real_GDP',
+            'A191RL1Q225SBEA': 'GDP_Growth_Rate',
 
             # Employment Data
-            'PAYEMS': 'Nonfarm_Payrolls',              # Non-Farm Payrolls (NFP)
-            'UNRATE': 'Unemployment_Rate',             # Unemployment Rate
-            'CIVPART': 'Labor_Force_Participation',    # Labor Force Participation Rate
-            'UNEMPLOY': 'Unemployed_Persons',          # Number of Unemployed
-            'EMRATIO': 'Employment_Population_Ratio',  # Employment-Population Ratio
-            'ICSA': 'Initial_Jobless_Claims',          # Initial Jobless Claims (weekly)
+            'PAYEMS': 'Nonfarm_Payrolls',
+            'UNRATE': 'Unemployment_Rate',
+            'CIVPART': 'Labor_Force_Participation',
+            'UNEMPLOY': 'Unemployed_Persons',
+            'EMRATIO': 'Employment_Population_Ratio',
+            'ICSA': 'Initial_Jobless_Claims',
 
             # Inflation Data
-            'CPIAUCSL': 'CPI',                         # Consumer Price Index (All Items)
-            'CPILFESL': 'Core_CPI',                    # Core CPI (ex food & energy)
-            'PPIACO': 'PPI',                           # Producer Price Index (All Commodities)
-            'PPIFIS': 'PPI_Final_Demand',              # PPI for Final Demand
-            'PCEPILFE': 'Core_PCE',                    # Core PCE Price Index (Fed's preferred)
+            'CPIAUCSL': 'CPI',
+            'CPILFESL': 'Core_CPI',
+            'PPIACO': 'PPI',
+            'PPIFIS': 'PPI_Final_Demand',
+            'PCEPILFE': 'Core_PCE',
 
             # Interest Rates & Monetary Policy
-            'DFF': 'Fed_Funds_Rate',                   # Federal Funds Effective Rate
-            'DGS10': 'Treasury_10Y',                   # 10-Year Treasury Rate
-            'DGS2': 'Treasury_2Y',                     # 2-Year Treasury Rate
-            'DGS5': 'Treasury_5Y',                     # 5-Year Treasury Rate
-            'T10Y2Y': 'Yield_Curve_10Y2Y',             # 10Y-2Y Treasury Spread
-            'T10Y3M': 'Yield_Curve_10Y3M',             # 10Y-3M Treasury Spread (recession indicator)
-            'MORTGAGE30US': 'Mortgage_Rate_30Y',       # 30-Year Mortgage Rate
+            'DFF': 'Fed_Funds_Rate',
+            'DGS10': 'Treasury_10Y',
+            'DGS2': 'Treasury_2Y',
+            'DGS5': 'Treasury_5Y',
+            'T10Y2Y': 'Yield_Curve_10Y2Y',
+            'T10Y3M': 'Yield_Curve_10Y3M',
+            'MORTGAGE30US': 'Mortgage_Rate_30Y',
 
             # Retail Sales & Consumer Spending
-            'RSXFS': 'Retail_Sales',                   # Advance Retail Sales
-            'RETAILSMSA': 'Retail_Sales_Total',        # Retail and Food Services Sales
-            'RRSFS': 'Retail_Sales_Ex_Auto',           # Retail Sales Ex Auto
-            'PCE': 'Personal_Consumption',             # Personal Consumption Expenditures
-            'PCEDG': 'PCE_Durable_Goods',              # PCE: Durable Goods
+            'RSXFS': 'Retail_Sales',
+            'RETAILSMSA': 'Retail_Sales_Total',
+            'RRSFS': 'Retail_Sales_Ex_Auto',
+            'PCE': 'Personal_Consumption',
+            'PCEDG': 'PCE_Durable_Goods',
 
             # PMI & Business Conditions
-            'MANEMP': 'Manufacturing_Employment',      # Manufacturing Employment
-            'INDPRO': 'Industrial_Production',         # Industrial Production Index
-            'IPMAN': 'Manufacturing_Production',       # Industrial Production: Manufacturing
-            'TCU': 'Capacity_Utilization',             # Capacity Utilization
+            'MANEMP': 'Manufacturing_Employment',
+            'INDPRO': 'Industrial_Production',
+            'IPMAN': 'Manufacturing_Production',
+            'TCU': 'Capacity_Utilization',
 
             # Consumer Confidence
-            'UMCSENT': 'Consumer_Sentiment_Michigan',  # University of Michigan Consumer Sentiment
-            'CSCICP03USM665S': 'Consumer_Confidence',  # OECD Consumer Confidence Index
+            'UMCSENT': 'Consumer_Sentiment_Michigan',
+            'CSCICP03USM665S': 'Consumer_Confidence',
 
             # Housing Market
-            'HOUST': 'Housing_Starts',                 # Housing Starts (thousands of units)
-            'PERMIT': 'Building_Permits',              # New Private Housing Units Authorized
-            'ASPUS': 'Average_Sales_Price_Houses',     # Average Sales Price of Houses Sold
-            'CSUSHPISA': 'Case_Shiller_Home_Price',    # S&P/Case-Shiller Home Price Index
-            'MSPUS': 'Median_Sales_Price_Houses',      # Median Sales Price of Houses
+            'HOUST': 'Housing_Starts',
+            'PERMIT': 'Building_Permits',
+            'ASPUS': 'Average_Sales_Price_Houses',
+            'CSUSHPISA': 'Case_Shiller_Home_Price',
+            'MSPUS': 'Median_Sales_Price_Houses',
 
             # Trade Balance
-            'BOPGSTB': 'Trade_Balance_Goods_Services', # Trade Balance: Goods and Services
-            'BOPGTB': 'Trade_Balance_Goods',           # Trade Balance: Goods
-            'XTEXVA01USM667S': 'Exports',              # Exports of Goods and Services
-            'XTIMVA01USM667S': 'Imports',              # Imports of Goods and Services
+            'BOPGSTB': 'Trade_Balance_Goods_Services',
+            'BOPGTB': 'Trade_Balance_Goods',
+            'XTEXVA01USM667S': 'Exports',
+            'XTIMVA01USM667S': 'Imports',
 
             # Market Indicators
-            'VIXCLS': 'VIX',                           # CBOE Volatility Index
-            'DEXUSEU': 'Dollar_Euro',                  # USD/EUR Exchange Rate
-            'DEXJPUS': 'Dollar_Yen',                   # USD/JPY Exchange Rate
-            'DEXCHUS': 'Dollar_Yuan',                  # USD/CNY Exchange Rate
-            'DCOILWTICO': 'Oil_Price_WTI',             # WTI Crude Oil Price
-            'DCOILBRENTEU': 'Oil_Price_Brent',         # Brent Crude Oil Price
-            'GOLDAMGBD228NLBM': 'Gold_Price',          # Gold Fixing Price
+            'VIXCLS': 'VIX',
+            'DEXUSEU': 'Dollar_Euro',
+            'DEXJPUS': 'Dollar_Yen',
+            'DEXCHUS': 'Dollar_Yuan',
+            'DCOILWTICO': 'Oil_Price_WTI',
+            'DCOILBRENTEU': 'Oil_Price_Brent',
+            'GOLDAMGBD228NLBM': 'Gold_Price',
 
             # Leading Economic Indicators
-            'USSLIND': 'Leading_Index',                # Leading Index for the United States
-            'M2SL': 'M2_Money_Supply',                 # M2 Money Stock
-            'DPCREDIT': 'Total_Credit',                # Domestic Private Credit
+            'USSLIND': 'Leading_Index',
+            'M2SL': 'M2_Money_Supply',
+            'DPCREDIT': 'Total_Credit',
         }
 
     print("  Fetching FRED economic data...")
@@ -141,7 +137,7 @@ def fetch_fred_data(start_date, end_date, series_ids=None):
                     # Silently skip unavailable series (some are quarterly/monthly only)
                     pass
 
-    print(f"    ✓ Successfully fetched {success_count}/{len(series_ids)} indicators")
+    print(f"    Successfully fetched {success_count}/{len(series_ids)} indicators")
 
     if all_data:
         df = pd.DataFrame(all_data)
@@ -149,11 +145,8 @@ def fetch_fred_data(start_date, end_date, series_ids=None):
         df.reset_index(inplace=True)
         df['date'] = df['date'].dt.strftime('%Y-%m-%d')
 
-        # Forward fill missing values (economic data is often weekly/monthly/quarterly)
-        df = df.fillna(method='ffill')
-
-        # Backward fill any remaining NaN at the start
-        df = df.fillna(method='bfill')
+        df = df.ffill()
+        df = df.bfill()
 
         print(f"    Total: {len(df)} days with {len(df.columns)-1} economic indicators")
 
@@ -169,10 +162,6 @@ def fetch_fred_data(start_date, end_date, series_ids=None):
     return pd.DataFrame()
 
 
-# ============================================================================
-# SEC EDGAR FILINGS (10-K, 10-Q)
-# ============================================================================
-
 def fetch_sec_filings(ticker, start_date, end_date):
     """
     Fetch SEC filings (10-K annual reports, 10-Q quarterly reports)
@@ -187,7 +176,7 @@ def fetch_sec_filings(ticker, start_date, end_date):
     try:
         from sec_edgar_downloader import Downloader
     except ImportError:
-        print("    Warning: sec-edgar-downloader not installed.")
+        print("  sec-edgar-downloader not installed.")
         return filing_sentiments
 
     try:
@@ -260,10 +249,6 @@ def extract_mda_section(filing_text):
     return ""
 
 
-# ============================================================================
-# YAHOO FINANCE EARNINGS TRANSCRIPTS
-# ============================================================================
-
 def fetch_earnings_transcripts(ticker, start_date, end_date):
     """
     Fetch earnings call transcripts and analyze sentiment
@@ -310,10 +295,6 @@ def fetch_earnings_transcripts(ticker, start_date, end_date):
     return transcript_sentiments
 
 
-# ============================================================================
-# INTEGRATION FUNCTION - COMBINES ALL SOURCES
-# ============================================================================
-
 def fetch_all_alternative_data(ticker, start_date, end_date):
     """
     Fetch all alternative data sources and combine them
@@ -330,14 +311,11 @@ def fetch_all_alternative_data(ticker, start_date, end_date):
     print(f"FETCHING ALTERNATIVE DATA FOR {ticker}")
     print(f"{'='*80}")
 
-    # 1. FRED Economic Data (once per run, not per ticker - call separately)
-    economic_data = fetch_fred_data(start_date, end_date)
-
-    # 2. SEC Filings
+    # SEC Filings
     sec_sentiments = fetch_sec_filings(ticker, start_date, end_date)
     time.sleep(2)
 
-    # 3. Earnings Transcripts
+    # Earnings Transcripts
     earnings_sentiments = fetch_earnings_transcripts(ticker, start_date, end_date)
 
     print(f"\n{'='*80}")
@@ -349,10 +327,6 @@ def fetch_all_alternative_data(ticker, start_date, end_date):
 
     return sec_sentiments, earnings_sentiments
 
-
-# ============================================================================
-# HELPER: ADD ALTERNATIVE DATA TO DATAFRAME
-# ============================================================================
 
 def add_alternative_features_to_df(df, ticker, economic_data, sec_sentiment, earnings_sentiment):
     """
@@ -370,19 +344,19 @@ def add_alternative_features_to_df(df, ticker, economic_data, sec_sentiment, ear
     """
     df = df.copy()
 
-    # 1. Merge economic data
+    # Merge economic data
     if not economic_data.empty:
         df = df.merge(economic_data, on='date', how='left')
 
         # Forward fill economic data (released weekly/monthly)
         econ_cols = [col for col in economic_data.columns if col != 'date']
-        df[econ_cols] = df[econ_cols].fillna(method='ffill')
+        df[econ_cols] = df[econ_cols].ffill()
 
-    # 2. Add SEC filing sentiment (forward fill between filings)
+    # Add SEC filing sentiment (forward fill between filings)
     df[f'{ticker}_SEC_Sentiment'] = df['date'].map(sec_sentiment)
-    df[f'{ticker}_SEC_Sentiment'] = df[f'{ticker}_SEC_Sentiment'].fillna(method='ffill').fillna(0)
+    df[f'{ticker}_SEC_Sentiment'] = df[f'{ticker}_SEC_Sentiment'].ffill().fillna(0)
 
-    # 3. Add earnings sentiment (binary flag + sentiment)
+    # Add earnings sentiment (binary flag + sentiment)
     df[f'{ticker}_Earnings_Event'] = df['date'].isin(earnings_sentiment.keys()).astype(int)
     df[f'{ticker}_Earnings_Sentiment'] = df['date'].map(earnings_sentiment).fillna(0)
 
@@ -398,6 +372,6 @@ def add_alternative_features_to_df(df, ticker, economic_data, sec_sentiment, ear
     df[f'{ticker}_Days_Since_Earnings'] = df['date'].apply(days_since_earnings)
 
     new_features = len([c for c in df.columns if c not in ['date', 'open', 'high', 'low', 'close', 'volume']])
-    print(f"  ✓ Added alternative features (total features: {new_features})")
+    print(f"  Added alternative features (total features: {new_features})")
 
     return df

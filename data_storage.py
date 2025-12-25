@@ -4,6 +4,7 @@ import os
 from collections import defaultdict, Counter
 import json
 import re
+from datetime import datetime
 
 
 def save_all_data_to_excel(
@@ -25,7 +26,7 @@ def save_all_data_to_excel(
         validated_mentions: dict of {ticker: Counter}
         all_related_companies: dict of {ticker: [related_tickers]}
         alpha_texts: dict of {ticker: alpha_text}
-        trained_models: dict of {ticker: {'metrics': {...}}}
+        trained_models: dict of {ticker: {'metrics': {...}}} or None
     """
 
     print(f"\n{'='*80}")
@@ -98,24 +99,37 @@ def save_all_data_to_excel(
     print("  Saving model results...")
     results_sheet = wb.create_sheet("Model Results")
     results_sheet.append([
-        "Ticker", "MSE", "RMSE", "MAE", "MAPE",
-        "Directional Accuracy", "Within 1% Accuracy"
+        "Ticker", "Model Type", "MSE", "RMSE", "MAE", "MAPE",
+        "Directional Accuracy", "Within 1% Accuracy",
+        "Up Precision", "Down Precision", "Large Move Hit Rate",
+        "Sharpe Ratio", "Win Rate", "Avg Uncertainty"
     ])
 
-    if trained_models:
+    # Check if trained_models is None or empty before iterating
+    if trained_models is not None and len(trained_models) > 0:
         for ticker, model_data in trained_models.items():
-            metrics = model_data['metrics']
+            metrics = model_data.get('metrics', {})
+            model_type = model_data.get('type', 'single')
+
             results_sheet.append([
                 ticker,
+                model_type,
                 metrics.get('MSE', 0),
                 metrics.get('RMSE', 0),
                 metrics.get('MAE', 0),
                 metrics.get('MAPE', 0) if metrics.get('MAPE') != float('inf') else 'N/A',
                 metrics.get('Directional Accuracy', 0),
-                metrics.get('Within 1% Accuracy', 0)
+                metrics.get('Within 1% Accuracy', 0),
+                metrics.get('Up Precision', 0),
+                metrics.get('Down Precision', 0),
+                metrics.get('Large Move Hit Rate', 0),
+                metrics.get('Sharpe Ratio', 0),
+                metrics.get('Win Rate', 0),
+                metrics.get('Avg Uncertainty', 0)
             ])
-
-    print(f"    Saved model results for {len(trained_models) if trained_models else 0} models")
+        print(f"    Saved model results for {len(trained_models)} tickers")
+    else:
+        print(f"    No model results to save (trained_models is None or empty)")
 
     print("  Saving metadata...")
     meta_sheet = wb.create_sheet("Metadata")
@@ -124,12 +138,10 @@ def save_all_data_to_excel(
     meta_sheet.append(["Primary Companies", len(stock_dataframes)])
     meta_sheet.append(["Total Related Companies", len(all_related_companies)])
     meta_sheet.append(["Data Complete", "Yes"])
-
-    from datetime import datetime
     meta_sheet.append(["Last Updated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 
     wb.save(filename)
-    print(f"\n✓ All data saved to {filename}")
+    print(f"\n All data saved to {filename}")
     print(f"{'='*80}\n")
 
 
@@ -143,7 +155,7 @@ def load_all_data_from_excel(filename):
     """
 
     if not os.path.exists(filename):
-        print(f"❌ File {filename} not found")
+        print(f" File {filename} not found")
         return None, None, None, None, None, False
 
     print(f"\n{'='*80}")
@@ -158,7 +170,7 @@ def load_all_data_from_excel(filename):
 
         missing_sheets = [s for s in required_sheets if s not in wb.sheetnames]
         if missing_sheets:
-            print(f"❌ Missing required sheets: {', '.join(missing_sheets)}")
+            print(f" Missing required sheets: {', '.join(missing_sheets)}")
             wb.close()
             return None, None, None, None, None, False
 
@@ -243,18 +255,18 @@ def load_all_data_from_excel(filename):
                 if ticker and alpha_text:
                     alpha_texts[ticker] = alpha_text
 
-        print(f"    ✓ Loaded alpha formulas for {len(alpha_texts)} tickers")
+        print(f"   Loaded alpha formulas for {len(alpha_texts)} tickers")
 
         wb.close()
 
-        print(f"\n✓ All data loaded successfully")
+        print(f"\n All data loaded successfully")
         print(f"{'='*80}\n")
 
         return (daily_sentiments, stock_dataframes, validated_mentions,
                 all_related_companies, alpha_texts, True)
 
     except Exception as e:
-        print(f"❌ Error loading data: {e}")
+        print(f" Error loading data: {e}")
         import traceback
         traceback.print_exc()
         return None, None, None, None, None, False
