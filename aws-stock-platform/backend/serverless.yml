@@ -1,0 +1,59 @@
+service: stock-prediction-api
+
+provider:
+  name: aws
+  runtime: python3.10
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+
+  environment:
+    PREDICTIONS_TABLE: ${self:service}-predictions-${self:provider.stage}
+    STOCK_DATA_TABLE: ${self:service}-stock-data-${self:provider.stage}
+    CONNECTIONS_TABLE: ${self:service}-connections-${self:provider.stage}
+    MODELS_BUCKET: ${self:service}-models-${self:provider.stage}
+
+functions:
+  getPrediction:
+    handler: lambda-functions/predictions/handler.lambda_handler
+    timeout: 30
+    memorySize: 3008
+    events:
+      - http:
+          path: predictions/{ticker}
+          method: get
+          cors: true
+
+  fetchData:
+    handler: lambda-functions/data-fetch/handler.lambda_handler
+    timeout: 300
+    events:
+      - schedule: rate(1 hour)
+
+  websocketConnect:
+    handler: lambda-functions/websocket/handler.connect_handler
+    events:
+      - websocket:
+          route: $connect
+
+  websocketDisconnect:
+    handler: lambda-functions/websocket/handler.disconnect_handler
+    events:
+      - websocket:
+          route: $disconnect
+
+resources:
+  Resources:
+    PredictionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.PREDICTIONS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: ticker
+            AttributeType: S
+        KeySchema:
+          - AttributeName: ticker
+            KeyType: HASH
+        TimeToLiveSpecification:
+          Enabled: true
+          AttributeName: ttl
