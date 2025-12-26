@@ -7,59 +7,38 @@ from datetime import datetime
 import os
 import sys
 
-# Add utils to path for shared code
 sys.path.insert(0, '/opt/python')
 sys.path.insert(0, '/var/task/utils')
 
-# Import your actual model class
-from lstm_predictor import ImprovedDualStreamLSTM, EnhancedAlphaComputer
+# Import YOUR actual model class
+from lstm_predictor import ImprovedDualStreamLSTM, ModelEnsemble, prepare_data_with_fixes
 
 s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
-# Cache for models (persists between invocations)
+# Cache for models
 MODEL_CACHE = {}
 
 def lambda_handler(event, context):
     """
-    GET /predictions/{ticker}
-    Returns stock prediction with uncertainty
+    Makes predictions using YOUR trained model
+    Called by orchestrator Lambda
     """
     try:
-        # Get ticker from API Gateway path parameters
-        ticker = event['pathParameters']['ticker'].upper()
+        ticker = event['ticker']
+        stock_data_json = event['stock_data']
+        alpha_text = event['alpha_text']
+        forecast_days = event.get('forecast_days', 7)
 
-        print(f"Processing prediction request for {ticker}")
+        print(f"Making prediction for {ticker}")
 
-        # 1. Check DynamoDB cache (predictions expire after 1 hour)
-        predictions_table = dynamodb.Table(os.environ['PREDICTIONS_TABLE'])
+        # ====================================================================
+        # STEP 1: LOAD MODEL FROM S3 (or cache)
+        # ====================================================================
 
-        try:
-            response = predictions_table.get_item(Key={'ticker': ticker})
-
-            if 'Item' in response:
-                cached_time = datetime.fromisoformat(response['Item']['timestamp'])
-                age_seconds = (datetime.now() - cached_time).total_seconds()
-
-                if age_seconds < 3600:  # 1 hour cache
-                    print(f"Returning cached prediction ({age_seconds:.0f}s old)")
-                    return {
-                        'statusCode': 200,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps(response['Item'])
-                    }
-        except Exception as e:
-            print(f"Cache check failed: {e}")
-
-        # 2. Load model from S3 (or use cached model)
         if ticker not in MODEL_CACHE:
             model_key = f'models/{ticker}_ensemble.pth'
             local_model_path = f'/tmp/{ticker}_ensemble.pth'
-
-            print(f"Downloading model from s3://{os.environ['MODELS_BUCKET']}/{model_key}")
 
             try:
                 s3.download_file(
@@ -68,162 +47,131 @@ def lambda_handler(event, context):
                     local_model_path
                 )
             except Exception as e:
-                print(f"Failed to download ensemble model: {e}")
-                # Try single model as fallback
-                model_key = f'models/{ticker}_model.pth'
-                s3.download_file(
-                    os.environ['MODELS_BUCKET'],
-                    model_key,
-                    local_model_path
-                )
+                print(f"Failed to download model: {e}")
+                return {
+                    'statusCode': 404,
+                    'body': json.dumps({
+                        'error': f'Model not found for {ticker}',
+                        'suggestion': 'Trigger training first'
+                    })
+                }
 
-            # Load model (your actual model class)
-            model = ImprovedDualStreamLSTM(
-                num_alphas=5,  # Adjust based on your model
+            # Load YOUR actual model
+            # Create dummy ensemble to load state
+            dummy_model = ImprovedDualStreamLSTM(
+                num_alphas=5,
                 hidden_size=128,
                 num_layers=3,
                 dropout=0.3,
                 num_heads=4
             )
 
-            model.load_state_dict(torch.load(local_model_path, map_location='cpu'))
-            model.eval()
+            ensemble = ModelEnsemble([dummy_model])
+            ensemble.load_state_dict(torch.load(local_model_path, map_location='cpu'))
+            ensemble.eval()
 
-            MODEL_CACHE[ticker] = model
-            print(f"Model loaded and cached for {ticker}")
+            MODEL_CACHE[ticker] = ensemble
+            print(f"Model loaded for {ticker}")
         else:
-            print(f"Using cached model for {ticker}")
-            model = MODEL_CACHE[ticker]
+            ensemble = MODEL_CACHE[ticker]
 
-        # 3. Get recent stock data from DynamoDB
-        stock_data_table = dynamodb.Table(os.environ['STOCK_DATA_TABLE'])
+        # ====================================================================
+        # STEP 2: PREPARE DATA (using YOUR function)
+        # ====================================================================
 
-        # Query last 60 days of data
-        response = stock_data_table.query(
-            KeyConditionExpression='ticker = :ticker',
-            ExpressionAttributeValues={':ticker': ticker},
-            ScanIndexForward=False,  # Most recent first
-            Limit=60
-        )
+        # Convert JSON back to DataFrame
+        stock_df = pd.DataFrame(stock_data_json)
 
-        if not response['Items']:
+        # Prepare data using YOUR actual function
+        train_loader, val_loader, test_loader, scalers, num_alphas, test_dates, train_df = \
+            prepare_data_with_fixes(
+                df=stock_df,
+                ticker=ticker,
+                alpha_text=alpha_text,
+                window_size=30,
+                use_feature_selection=True,
+                top_k=30
+            )
+
+        if test_loader is None or len(test_loader.dataset) == 0:
             return {
-                'statusCode': 404,
-                'body': json.dumps({'error': f'No data found for {ticker}'})
+                'statusCode': 400,
+                'body': json.dumps({
+                    'error': 'Insufficient data for prediction',
+                    'ticker': ticker
+                })
             }
 
-        # 4. Prepare features (simplified version - you'll need to adapt)
-        items = sorted(response['Items'], key=lambda x: x['date'])
+        # ====================================================================
+        # STEP 3: MAKE PREDICTION
+        # ====================================================================
 
-        # Create dataframe
-        df = pd.DataFrame(items)
+        ensemble.eval()
 
-        # YOUR ACTUAL FEATURE PREPARATION
-        # This is simplified - adapt from your prepare_dataframe_for_alpha function
-        features = prepare_features_for_inference(df, ticker)
-
-        # 5. Make prediction
         with torch.no_grad():
-            alphas = torch.FloatTensor(features['alphas']).unsqueeze(0)
-            prices_temporal = torch.FloatTensor(features['prices_temporal']).unsqueeze(0)
+            # Get the last batch from test_loader
+            for batch in test_loader:
+                alphas, prices_temporal, targets = batch
 
-            # Get prediction with uncertainty
-            prediction, uncertainty = model(alphas, prices_temporal,
-                                           n_samples=10, training=False)
+            # Make prediction with uncertainty
+            predictions, uncertainties = ensemble(
+                alphas,
+                prices_temporal,
+                n_samples=10,
+                training=False
+            )
 
-            predicted_change = float(prediction[0][0])
-            uncertainty_value = float(uncertainty[0][0])
+            predicted_change = float(predictions[-1][0])
+            uncertainty = float(uncertainties[-1][0])
 
-        # 6. Format result
+        # Inverse scale if needed
+        if 'target' in scalers:
+            predicted_change_unscaled = scalers['target'].inverse_transform(
+                [[predicted_change]]
+            )[0][0]
+        else:
+            predicted_change_unscaled = predicted_change
+
+        # ====================================================================
+        # STEP 4: FORMAT RESULT
+        # ====================================================================
+
+        direction = 'UP' if predicted_change_unscaled > 0 else 'DOWN'
+        confidence = 1 - min(uncertainty, 1.0)
+
         result = {
             'ticker': ticker,
-            'predicted_change': predicted_change,
-            'direction': 'UP' if predicted_change > 0 else 'DOWN',
-            'confidence': 1 - min(uncertainty_value, 1.0),  # Convert uncertainty to confidence
-            'confidence_interval': [
-                predicted_change - 2*uncertainty_value,
-                predicted_change + 2*uncertainty_value
-            ],
-            'timestamp': datetime.now().isoformat(),
-            'ttl': int(datetime.now().timestamp()) + 3600  # Expire in 1 hour
+            'predicted_change': float(predicted_change_unscaled),
+            'direction': direction,
+            'confidence': float(confidence),
+            'uncertainty': float(uncertainty),
+            'timestamp': datetime.now().isoformat()
         }
 
-        # 7. Cache in DynamoDB
+        # Cache in DynamoDB
         try:
-            predictions_table.put_item(Item=result)
+            predictions_table = dynamodb.Table(os.environ['PREDICTIONS_TABLE'])
+            predictions_table.put_item(Item={
+                **result,
+                'ttl': int(datetime.now().timestamp()) + 3600
+            })
         except Exception as e:
-            print(f"Failed to cache prediction: {e}")
+            print(f"Warning: Could not cache prediction: {e}")
 
-        # 8. Return result
         return {
             'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
             'body': json.dumps(result)
         }
 
     except Exception as e:
-        print(f"Error in lambda_handler: {str(e)}")
+        print(f"❌ Prediction error: {str(e)}")
         import traceback
         traceback.print_exc()
 
         return {
             'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
             'body': json.dumps({
                 'error': str(e),
-                'ticker': event.get('pathParameters', {}).get('ticker', 'unknown')
+                'ticker': ticker if 'ticker' in locals() else 'unknown'
             })
         }
-
-
-def prepare_features_for_inference(df, ticker):
-    """
-    Simplified feature preparation for inference
-    Adapt this based on your actual model's input requirements
-    """
-    # Calculate technical indicators (from your code)
-    df['SMA_20'] = df['close'].rolling(20).mean()
-    df['RSI'] = calculate_rsi(df['close'])
-    df['MACD'] = calculate_macd(df['close'])
-
-    # For now, return dummy features - YOU NEED TO ADAPT THIS
-    # based on what your model actually expects
-
-    window_size = 30
-    last_window = df.tail(window_size)
-
-    # Alpha features (simplified)
-    alphas = last_window[['SMA_20', 'RSI', 'MACD', 'close', 'volume']].fillna(0).values
-
-    # Price/temporal features
-    prices_temporal = last_window[['close', 'volume']].fillna(0).values
-
-    # Add temporal features (day of week, etc.)
-    # Add more columns to match your model's expected input
-
-    return {
-        'alphas': alphas[:, :5],  # First 5 features as alphas
-        'prices_temporal': prices_temporal
-    }
-
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI"""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def calculate_macd(prices):
-    """Calculate MACD"""
-    ema_12 = prices.ewm(span=12, adjust=False).mean()
-    ema_26 = prices.ewm(span=26, adjust=False).mean()
-    return ema_12 - ema_26

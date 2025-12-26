@@ -11,82 +11,69 @@ os.environ['PREDICTIONS_TABLE'] = 'test-predictions'
 os.environ['STOCK_DATA_TABLE'] = 'test-stock-data'
 os.environ['MODELS_BUCKET'] = 'test-models'
 
-print(" Testing Lambda Handler Imports...")
+print("🔍 Testing Lambda Handler Imports...")
 print("=" * 60)
 
-# Test 1: Import handler functions
+# Test 1: Import handler
 try:
-    # Import directly from the handler module in lambda-functions/predictions
     import handler
-
-    # Now access the functions
-    prepare_features_for_inference = handler.prepare_features_for_inference
-    calculate_rsi = handler.calculate_rsi
-    calculate_macd = handler.calculate_macd
-
-    print(" Successfully imported handler functions")
+    print("✅ Successfully imported handler module")
+    print(f"  - lambda_handler function exists: {hasattr(handler, 'lambda_handler')}")
 except ImportError as e:
-    print(f" Failed to import handler: {e}")
-    print(f"  Current sys.path: {sys.path[:3]}")
-    print(f"  Looking for: lambda-functions/predictions/handler.py")
+    print(f"❌ Failed to import handler: {e}")
     sys.exit(1)
 
-# Test 2: Import your model classes
+# Test 2: Import your model classes and functions
 try:
-    from lstm_predictor import ImprovedDualStreamLSTM
-    print(" Successfully imported LSTM model classes")
+    from lstm_predictor import (
+        ImprovedDualStreamLSTM,
+        ModelEnsemble,
+        prepare_data_with_fixes
+    )
+    print("✅ Successfully imported LSTM model classes and functions")
 except ImportError as e:
-    print(f" Failed to import LSTM model: {e}")
+    print(f"❌ Failed to import LSTM model: {e}")
     sys.exit(1)
 
-# Test 3: Test calculate_rsi function
+# Test 3: Test prepare_data_with_fixes function with dummy data
 try:
     import pandas as pd
     import numpy as np
 
-    # Create sample data
-    test_prices = pd.Series([100, 102, 101, 103, 105, 104, 106, 108, 107, 109,
-                            111, 110, 112, 114, 113, 115, 117])
-
-    rsi = calculate_rsi(test_prices)
-
-    print(f" RSI calculation works! Last RSI value: {rsi.iloc[-1]:.2f}")
-
-except Exception as e:
-    print(f" RSI calculation failed: {e}")
-
-# Test 4: Test calculate_macd function
-try:
-    macd = calculate_macd(test_prices)
-    print(f" MACD calculation works! Last MACD value: {macd.iloc[-1]:.4f}")
-except Exception as e:
-    print(f" MACD calculation failed: {e}")
-
-# Test 5: Test feature preparation (with dummy data)
-try:
-    # Create dummy DataFrame
-    dates = pd.date_range('2025-01-01', periods=60, freq='D')
+    # Create dummy DataFrame with more realistic data
+    dates = pd.date_range('2023-01-01', periods=100, freq='D')
     dummy_df = pd.DataFrame({
         'date': dates.astype(str),
-        'open': np.random.uniform(100, 110, 60),
-        'high': np.random.uniform(110, 120, 60),
-        'low': np.random.uniform(90, 100, 60),
-        'close': np.random.uniform(100, 110, 60),
-        'volume': np.random.randint(1000000, 10000000, 60)
+        'open': np.random.uniform(100, 110, 100),
+        'high': np.random.uniform(110, 120, 100),
+        'low': np.random.uniform(90, 100, 100),
+        'close': np.random.uniform(100, 110, 100),
+        'volume': np.random.randint(1000000, 10000000, 100)
     })
 
-    features = prepare_features_for_inference(dummy_df, 'AAPL')
+    # Test data preparation
+    train_loader, val_loader, test_loader, scalers, num_alphas, test_dates, train_df = \
+        prepare_data_with_fixes(
+            df=dummy_df,
+            ticker='TEST',
+            alpha_text='test alpha',
+            window_size=30,
+            use_feature_selection=True,
+            top_k=30
+        )
 
-    print(f" Feature preparation works!")
-    print(f"  - Alpha features shape: {features['alphas'].shape}")
-    print(f"  - Price/temporal features shape: {features['prices_temporal'].shape}")
+    print(f"✅ Data preparation works!")
+    print(f"  - Number of alphas: {num_alphas}")
+    print(f"  - Train batches: {len(train_loader) if train_loader else 0}")
+    print(f"  - Val batches: {len(val_loader) if val_loader else 0}")
+    print(f"  - Test batches: {len(test_loader) if test_loader else 0}")
 
 except Exception as e:
-    print(f" Feature preparation failed: {e}")
+    print(f"❌ Data preparation failed: {e}")
     import traceback
     traceback.print_exc()
 
-# Test 6: Test model initialization
+# Test 4: Test model initialization
 try:
     model = ImprovedDualStreamLSTM(
         num_alphas=5,
@@ -95,12 +82,35 @@ try:
         dropout=0.3,
         num_heads=4
     )
-    print(f" Model initialization works!")
+    print(f"✅ Model initialization works!")
     print(f"  - Model has {sum(p.numel() for p in model.parameters()):,} parameters")
 
+    # Test ensemble
+    ensemble = ModelEnsemble([model])
+    print(f"✅ Ensemble initialization works!")
+
 except Exception as e:
-    print(f" Model initialization failed: {e}")
+    print(f"❌ Model initialization failed: {e}")
+    import traceback
+    traceback.print_exc()
+
+# Test 5: Mock lambda_handler event
+try:
+    # Create a mock event (you'll need to mock boto3 for this to work fully)
+    mock_event = {
+        'ticker': 'AAPL',
+        'stock_data': dummy_df.to_dict('records'),
+        'alpha_text': 'test alpha',
+        'forecast_days': 7
+    }
+
+    print(f"✅ Mock event created successfully")
+    print(f"  - Ticker: {mock_event['ticker']}")
+    print(f"  - Data points: {len(mock_event['stock_data'])}")
+
+except Exception as e:
+    print(f"❌ Mock event creation failed: {e}")
 
 print("\n" + "=" * 60)
-print(" All tests completed!")
+print("✅ All tests completed!")
 print("=" * 60)
