@@ -21,7 +21,6 @@ from data_storage import (
 from alternative_data_sources import (
     fetch_fred_data,
     fetch_all_alternative_data,
-    add_alternative_features_to_df
 )
 
 client = RESTClient(secret_key.API_KEY)
@@ -930,12 +929,12 @@ if not load_from_cache:
 
             is_valid, reason = validate_ticker_quality(related_ticker, min_market_cap=5e9)
             if not is_valid:
-                print(f"    ✗ Skipped {related_ticker}: {reason}")
+                print(f"     Skipped {related_ticker}: {reason}")
                 continue
 
             related_companies.append(related_ticker)
             all_related_tickers.add(related_ticker)
-            print(f"    ✓ Added {related_ticker} ({related_name}): {count} mentions")
+            print(f"     Added {related_ticker} ({related_name}): {count} mentions")
 
         all_related_companies[ticker] = related_companies
         print(f"  Found {len(related_companies)} related companies")
@@ -979,7 +978,7 @@ if not load_from_cache:
 
         time.sleep(3)
 
-    print("\n✓ Alternative data collection complete")
+    print("\n Alternative data collection complete")
 
     print("\n" + "="*80)
     print("PHASE 3: FETCHING STOCK DATA")
@@ -1078,18 +1077,18 @@ for ticker, name in companies.items():
     )
 
     if comprehensive_df is None or comprehensive_df.empty:
-        print(f"❌ Failed to prepare data for {ticker}")
+        print(f" Failed to prepare data for {ticker}")
         continue
 
     try:
         alpha_text = alpha_texts.get(ticker, generate_simple_alphas(ticker))
 
         if len(comprehensive_df) < 100:
-            print(f"❌ Insufficient data for {ticker}: only {len(comprehensive_df)} rows")
+            print(f" Insufficient data for {ticker}: only {len(comprehensive_df)} rows")
             print(f"   Need at least 100 rows for training")
             continue
 
-        print(f"✓ Data ready: {len(comprehensive_df)} rows with {len(comprehensive_df.columns)} features")
+        print(f" Data ready: {len(comprehensive_df)} rows with {len(comprehensive_df.columns)} features")
 
         print(f"\nAttempting ensemble training...")
         ensemble, metrics, scalers = train_ensemble(
@@ -1111,7 +1110,7 @@ for ticker, name in companies.items():
             }
 
             torch.save(ensemble.state_dict(), f'{ticker}_ensemble.pth')
-            print(f"\n✅ Ensemble saved as {ticker}_ensemble.pth")
+            print(f"\n Ensemble saved as {ticker}_ensemble.pth")
 
             for i, model in enumerate(ensemble.models):
                 torch.save(model.state_dict(), f'{ticker}_model_{i}.pth')
@@ -1119,7 +1118,7 @@ for ticker, name in companies.items():
             successful_trainings += 1
 
         else:
-            print(f"⚠ Ensemble training failed, trying single model...")
+            print(f" Ensemble training failed, trying single model...")
 
             model, metrics, scalers = train_stock_predictor(
                 ticker=ticker,
@@ -1139,13 +1138,13 @@ for ticker, name in companies.items():
                     'type': 'single'
                 }
                 torch.save(model.state_dict(), f'{ticker}_model.pth')
-                print(f"✅ Single model saved as {ticker}_model.pth")
+                print(f" Single model saved as {ticker}_model.pth")
                 successful_trainings += 1
             else:
-                print(f"❌ Single model training also failed for {ticker}")
+                print(f" Single model training also failed for {ticker}")
 
     except Exception as e:
-        print(f"\n❌ Error training model for {ticker}: {e}")
+        print(f"\n Error training model for {ticker}: {e}")
         import traceback
         traceback.print_exc()
         print(f"Continuing with next ticker...")
@@ -1197,6 +1196,6 @@ for ticker in trained_models:
     if model_type == 'ensemble':
         print(f"    - Ensemble of {len(model_data['model'].models)} models")
 
-print(f"\n💾 All data cached in {DATA_FILE}")
+print(f"\n All data cached in {DATA_FILE}")
 print(f"   Next run will load from cache automatically!")
 print("="*80)
