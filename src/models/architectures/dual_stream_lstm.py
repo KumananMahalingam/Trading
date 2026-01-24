@@ -64,11 +64,16 @@ class ImprovedDualStreamLSTM(nn.Module):
             batch_first=True
         )
 
-        # Feature fusion layers - Use LayerNorm instead of BatchNorm
+        # Feature fusion layers - **ENHANCED: Deeper network for better pattern capture**
         total_features = hidden_size * 8  # (LSTM + TCN) * 2 streams * bidirectional
 
         self.fusion_layers = nn.Sequential(
-            nn.Linear(total_features, 512),
+            nn.Linear(total_features, 1024),
+            nn.LayerNorm(1024),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+
+            nn.Linear(1024, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(dropout),

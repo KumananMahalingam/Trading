@@ -67,6 +67,10 @@ def add_advanced_features(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    # **FIX 1: Add Returns column FIRST (before alpha computation)**
+    if 'close' in df.columns:
+        df['Returns'] = df['close'].pct_change()
+
     # Price-based features
     if 'close' in df.columns:
         # Multi-timeframe returns
@@ -106,19 +110,51 @@ def add_advanced_features(df):
         # Volume-price correlation
         df['volume_price_corr_10'] = df['volume'].rolling(10).corr(df['close'])
 
+    # **FIX 2: Build features efficiently using lists, then concat (avoid fragmentation)**
+    new_features = {}
+
     # Sentiment momentum features
     sentiment_cols = [col for col in df.columns if 'Sentiment' in col and not col.startswith('alpha_')]
     for col in sentiment_cols:
-        df[f'{col}_MA5'] = df[col].rolling(5).mean()
-        df[f'{col}_MA20'] = df[col].rolling(20).mean()
-        df[f'{col}_Change'] = df[col].diff()
-        df[f'{col}_Momentum'] = df[col] - df[col].rolling(5).mean()
+        new_features[f'{col}_MA5'] = df[col].rolling(5).mean()
+        new_features[f'{col}_MA20'] = df[col].rolling(20).mean()
+        new_features[f'{col}_Change'] = df[col].diff()
+        new_features[f'{col}_Momentum'] = df[col] - df[col].rolling(5).mean()
 
     # Economic data features
     econ_cols = [col for col in df.columns if any(ind in col for ind in
                 ['GDP', 'CPI', 'Unemployment', 'Fed_Funds', 'Treasury', 'VIX'])]
     for col in econ_cols:
-        df[f'{col}_Change'] = df[col].pct_change()
+        new_features[f'{col}_Change'] = df[col].pct_change()
+
+    # **FIX 3: Add interaction features between top signals (Amazon sentiment + others)**
+    # These are based on the analysis showing AMZN_Sentiment as top predictor
+    if 'AMZN_Sentiment' in df.columns:
+        # AMZN sentiment interactions with other stocks
+        for ticker_col in ['AAPL_Sentiment', 'GOOG_Sentiment', 'MSFT_Sentiment']:
+            if ticker_col in df.columns:
+                new_features[f'AMZN_{ticker_col}_Interaction'] = df['AMZN_Sentiment'] * df[ticker_col]
+                new_features[f'AMZN_{ticker_col}_Ratio'] = df['AMZN_Sentiment'] / (df[ticker_col].abs() + 1e-8)
+
+        # AMZN sentiment with volatility
+        if 'volatility_20d' in df.columns:
+            new_features['AMZN_Sent_Vol_Interaction'] = df['AMZN_Sentiment'] * df['volatility_20d']
+
+        # AMZN sentiment with returns
+        if 'Returns' in df.columns:
+            new_features['AMZN_Sent_Return_Interaction'] = df['AMZN_Sentiment'] * df['Returns']
+
+    # Sentiment divergence interactions
+    if 'Sentiment_Div_AAPL_GOOG' in df.columns:
+        if 'Returns' in df.columns:
+            new_features['SentDiv_Return_Interaction'] = df['Sentiment_Div_AAPL_GOOG'] * df['Returns']
+        if 'volatility_20d' in df.columns:
+            new_features['SentDiv_Vol_Interaction'] = df['Sentiment_Div_AAPL_GOOG'] * df['volatility_20d']
+
+    # Add all new features at once (efficient)
+    if new_features:
+        new_features_df = pd.DataFrame(new_features, index=df.index)
+        df = pd.concat([df, new_features_df], axis=1)
 
     # Market regime detection
     if 'close' in df.columns and 'volatility_20d' in df.columns:
@@ -137,7 +173,7 @@ def add_advanced_features(df):
     # Fill NaN values (forward fill for time series, 0 for others)
     for col in df.columns:
         if col not in ['date', 'target']:
-            if df[col].dtype in ['float64', 'int64']:
+            if pd.api.types.is_numeric_dtype(df[col]):
                 df[col] = df[col].ffill().bfill().fillna(0)
 
     print(f"  Added {len(df.columns)} total features")

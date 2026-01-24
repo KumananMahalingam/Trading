@@ -3,6 +3,7 @@ Custom loss functions for stock prediction
 """
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 class HybridLoss(nn.Module):
@@ -68,21 +69,38 @@ def create_balanced_hybrid_loss(train_df):
         print("Extreme class imbalance detected!")
         return HybridLoss(alpha=0.7, beta=0.2, gamma=0.1, class_weights=None)
 
-    # Inverse frequency weighting
-    up_weight = total / (2.0 * up_count)
-    down_weight = total / (2.0 * down_count)
+    # **FIX 4: More aggressive inverse frequency weighting**
+    # Use square root of inverse frequency for more aggressive balancing
+    up_weight = np.sqrt(total / (2.0 * up_count))
+    down_weight = np.sqrt(total / (2.0 * down_count))
 
     # Normalize weights so they sum to 2.0
     weight_sum = up_weight + down_weight
     up_weight = 2.0 * up_weight / weight_sum
     down_weight = 2.0 * down_weight / weight_sum
 
+    # Apply additional boost to minority class (typically UP)
+    if up_count < down_count:
+        boost_factor = 1.5  # Boost minority class by 50%
+        up_weight *= boost_factor
+        # Renormalize
+        weight_sum = up_weight + down_weight
+        up_weight = 2.0 * up_weight / weight_sum
+        down_weight = 2.0 * down_weight / weight_sum
+    else:
+        boost_factor = 1.5
+        down_weight *= boost_factor
+        weight_sum = up_weight + down_weight
+        up_weight = 2.0 * up_weight / weight_sum
+        down_weight = 2.0 * down_weight / weight_sum
+
     print(f"\n  Class Distribution:")
     print(f"  UP samples: {up_count} ({up_count/total*100:.1f}%)")
     print(f"  DOWN samples: {down_count} ({down_count/total*100:.1f}%)")
     print(f"  Neutral: {neutral_count}")
-    print(f"\n  Loss Weights:")
+    print(f"\n  AGGRESSIVE Loss Weights (with {boost_factor}x minority boost):")
     print(f"  UP weight: {up_weight:.3f}")
     print(f"  DOWN weight: {down_weight:.3f}")
 
-    return HybridLoss(alpha=0.7, beta=0.3, gamma=0.1, class_weights=[up_weight, down_weight])
+    # Increase beta (direction weight) to emphasize directional accuracy
+    return HybridLoss(alpha=0.6, beta=0.35, gamma=0.05, class_weights=[up_weight, down_weight])

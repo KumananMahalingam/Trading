@@ -25,6 +25,11 @@ def select_top_features(df, target_col='target', top_k=30, method='correlation',
     if exclude_cols is None:
         exclude_cols = ['date', 'ticker', 'symbol']
 
+    # Check for duplicate columns and remove them
+    if df.columns.duplicated().any():
+        print(f"  Warning: Found duplicate columns, removing them...")
+        df = df.loc[:, ~df.columns.duplicated()]
+
     # Get all feature columns
     feature_cols = [col for col in df.columns
                    if col != target_col and col not in exclude_cols]
@@ -32,8 +37,14 @@ def select_top_features(df, target_col='target', top_k=30, method='correlation',
     # Remove columns with too many NaNs
     valid_cols = []
     for col in feature_cols:
-        if df[col].notna().sum() > len(df) * 0.5:
-            valid_cols.append(col)
+        try:
+            # Check if column has sufficient non-NaN values
+            non_nan_count = df[col].notna().sum()
+            if non_nan_count > len(df) * 0.5:
+                valid_cols.append(col)
+        except Exception as e:
+            print(f"  Warning: Skipping column {col}: {e}")
+            continue
 
     print(f"\n{'='*80}")
     print(f"FEATURE SELECTION")
