@@ -1,0 +1,26 @@
+"""
+Constants used throughout the application
+"""
+# Default values for various operations
+DEFAULT_WINDOW_SIZE = 30
+DEFAULT_NUM_EPOCHS = 150
+DEFAULT_LEARNING_RATE = 3e-4
+DEFAULT_BATCH_SIZE = 32
+
+# Model architecture defaults
+DEFAULT_HIDDEN_SIZE = 128
+DEFAULT_NUM_LAYERS = 3
+DEFAULT_DROPOUT = 0.3
+DEFAULT_NUM_HEADS = 4
+
+# Feature selection defaults
+DEFAULT_TOP_K_FEATURES = 30
+DEFAULT_MIN_CORRELATION = 0.01
+
+# Ensemble defaults
+DEFAULT_ENSEMBLE_SIZE = 2
+DEFAULT_MC_SAMPLES = 10
+
+# Training defaults
+DEFAULT_PATIENCE = 30
+DEFAULT_GRADIENT_CLIP_NORM = 1.0

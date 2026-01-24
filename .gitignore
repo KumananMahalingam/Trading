@@ -1,5 +1,69 @@
-sec-edgar-filings/
-*.pth
-*.xlsx
+"""
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data
+*.xlsx
+*.csv
+*.h5
+*.pkl
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Models
+*.pth
+*.pt
+data/models/*
+!data/models/.gitkeep
+
+# Outputs
+outputs/plots/*
+outputs/reports/*
+!outputs/plots/.gitkeep
+!outputs/reports/.gitkeep
+
+# Secrets
+config/secret_key.py
+
+# SEC filings
+sec-edgar-filings/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+"""

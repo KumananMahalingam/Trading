@@ -1,0 +1,202 @@
+"""
+Advanced feature engineering for stock prediction
+"""
+import pandas as pd
+import numpy as np
+
+
+def add_alternative_features_to_df(df, ticker, economic_data, sec_sentiment, earnings_sentiment):
+    """
+    Add all alternative data features to the main dataframe
+
+    Args:
+        df: Main stock dataframe with date column
+        ticker: Stock ticker
+        economic_data: DataFrame with economic indicators
+        sec_sentiment: dict of {date: sentiment_score}
+        earnings_sentiment: dict of {date: sentiment_score}
+
+    Returns:
+        Enhanced dataframe
+    """
+    df = df.copy()
+
+    # Merge economic data
+    if not economic_data.empty:
+        df = df.merge(economic_data, on='date', how='left')
+
+        # Forward fill economic data (released weekly/monthly)
+        econ_cols = [col for col in economic_data.columns if col != 'date']
+        df[econ_cols] = df[econ_cols].ffill()
+
+    # Add SEC filing sentiment (forward fill between filings)
+    df[f'{ticker}_SEC_Sentiment'] = df['date'].map(sec_sentiment)
+    df[f'{ticker}_SEC_Sentiment'] = df[f'{ticker}_SEC_Sentiment'].ffill().fillna(0)
+
+    # Add earnings sentiment (binary flag + sentiment)
+    df[f'{ticker}_Earnings_Event'] = df['date'].isin(earnings_sentiment.keys()).astype(int)
+    df[f'{ticker}_Earnings_Sentiment'] = df['date'].map(earnings_sentiment).fillna(0)
+
+    # Days since last earnings (useful feature)
+    earnings_dates = sorted([d for d in earnings_sentiment.keys()])
+    def days_since_earnings(date):
+        date_obj = pd.to_datetime(date)
+        previous_earnings = [pd.to_datetime(d) for d in earnings_dates if pd.to_datetime(d) <= date_obj]
+        if previous_earnings:
+            return (date_obj - max(previous_earnings)).days
+        return 999  # No previous earnings
+
+    df[f'{ticker}_Days_Since_Earnings'] = df['date'].apply(days_since_earnings)
+
+    new_features = len([c for c in df.columns if c not in ['date', 'open', 'high', 'low', 'close', 'volume']])
+    print(f"  Added alternative features (total features: {new_features})")
+
+    return df
+
+
+def add_advanced_features(df):
+    """Add advanced technical indicators and features"""
+    df = df.copy()
+
+    if df.empty:
+        return df
+
+    # Ensure numeric columns
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Price-based features
+    if 'close' in df.columns:
+        # Multi-timeframe returns
+        for window in [1, 3, 5, 10, 20, 50]:
+            df[f'return_{window}d'] = df['close'].pct_change(window)
+
+        # Rolling volatility
+        for window in [5, 10, 20, 50]:
+            df[f'volatility_{window}d'] = df['close'].pct_change().rolling(window).std()
+
+        # Price position within recent range
+        for window in [20, 50, 200]:
+            df[f'price_position_{window}d'] = (
+                (df['close'] - df['low'].rolling(window).min()) /
+                (df['high'].rolling(window).max() - df['low'].rolling(window).min())
+            )
+
+        # Trend strength (slope of linear regression)
+        for window in [20, 50]:
+            def calculate_slope(series):
+                if len(series) < window:
+                    return np.nan
+                x = np.arange(len(series))
+                slope = np.polyfit(x, series, 1)[0]
+                return slope / np.std(series) if np.std(series) > 0 else 0
+
+            df[f'trend_strength_{window}d'] = df['close'].rolling(window).apply(
+                calculate_slope, raw=False
+            )
+
+    # Volume-based features
+    if 'volume' in df.columns:
+        df['volume_sma_20'] = df['volume'].rolling(20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_sma_20']
+        df['volume_zscore'] = (df['volume'] - df['volume'].rolling(20).mean()) / df['volume'].rolling(20).std()
+
+        # Volume-price correlation
+        df['volume_price_corr_10'] = df['volume'].rolling(10).corr(df['close'])
+
+    # Sentiment momentum features
+    sentiment_cols = [col for col in df.columns if 'Sentiment' in col and not col.startswith('alpha_')]
+    for col in sentiment_cols:
+        df[f'{col}_MA5'] = df[col].rolling(5).mean()
+        df[f'{col}_MA20'] = df[col].rolling(20).mean()
+        df[f'{col}_Change'] = df[col].diff()
+        df[f'{col}_Momentum'] = df[col] - df[col].rolling(5).mean()
+
+    # Economic data features
+    econ_cols = [col for col in df.columns if any(ind in col for ind in
+                ['GDP', 'CPI', 'Unemployment', 'Fed_Funds', 'Treasury', 'VIX'])]
+    for col in econ_cols:
+        df[f'{col}_Change'] = df[col].pct_change()
+
+    # Market regime detection
+    if 'close' in df.columns and 'volatility_20d' in df.columns:
+        df['market_regime'] = 0
+        bull_condition = (
+            (df['close'] > df['close'].rolling(50).mean()) &
+            (df['volatility_20d'] < df['volatility_20d'].rolling(50).mean())
+        )
+        bear_condition = (
+            (df['close'] < df['close'].rolling(50).mean()) &
+            (df['volatility_20d'] > df['volatility_20d'].rolling(50).mean())
+        )
+        df.loc[bull_condition, 'market_regime'] = 1
+        df.loc[bear_condition, 'market_regime'] = -1
+
+    # Fill NaN values (forward fill for time series, 0 for others)
+    for col in df.columns:
+        if col not in ['date', 'target']:
+            if df[col].dtype in ['float64', 'int64']:
+                df[col] = df[col].ffill().bfill().fillna(0)
+
+    print(f"  Added {len(df.columns)} total features")
+    return df
+
+
+def prepare_dataframe_for_alpha(ticker, stock_df, daily_sentiments, related_companies,
+                                alternative_data=None, economic_data=None):
+    """ENHANCED: Prepare dataframe with sentiment lag features"""
+    if stock_df.empty:
+        return None
+
+    from src.data.processors.technical_indicators import calculate_technical_indicators
+
+    df = calculate_technical_indicators(stock_df.copy())
+
+    sentiment_dict = {}
+    for date, scores in daily_sentiments[ticker].items():
+        sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
+    df[f'{ticker}_Sentiment'] = df['date'].map(sentiment_dict).fillna(0)
+
+    df[f'{ticker}_Sentiment_Lag1'] = df[f'{ticker}_Sentiment'].shift(1)
+    df[f'{ticker}_Sentiment_Lag5'] = df[f'{ticker}_Sentiment'].shift(5)
+
+    df[f'{ticker}_Sentiment_Change'] = df[f'{ticker}_Sentiment'].diff()
+    df[f'{ticker}_Sentiment_MA5'] = df[f'{ticker}_Sentiment'].rolling(5).mean()
+
+    for related_ticker in related_companies:
+        if related_ticker in daily_sentiments:
+            related_sentiment_dict = {}
+            for date, scores in daily_sentiments[related_ticker].items():
+                related_sentiment_dict[date] = sum(scores) / len(scores) if scores else 0
+            df[f'{related_ticker}_Sentiment'] = df['date'].map(related_sentiment_dict).fillna(0)
+
+            df[f'Sentiment_Div_{ticker}_{related_ticker}'] = \
+                df[f'{ticker}_Sentiment'] - df[f'{related_ticker}_Sentiment']
+
+    if alternative_data and ticker in alternative_data:
+        df = add_alternative_features_to_df(
+            df, ticker,
+            economic_data if economic_data is not None else pd.DataFrame(),
+            alternative_data[ticker]['sec'],
+            alternative_data[ticker]['earnings']
+        )
+
+    return df
+
+
+def create_target_safely(df):
+    """
+    Create target WITHOUT data leakage
+    """
+    df = df.copy()
+
+    if 'close' in df.columns:
+        # Next day's return
+        df['target'] = df['close'].pct_change(1).shift(-1)
+
+        # Drop the last row (has NaN target)
+        df = df[:-1].copy()
+
+    return df
