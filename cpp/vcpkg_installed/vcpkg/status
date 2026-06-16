@@ -1,0 +1,106 @@
+Package: vcpkg-cmake-config
+Version: 2024-05-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 61fbba4a3c2fba5fc24934a2e44771f95c255b15c91dbf5141abb38c155c38d8
+Status: install ok installed
+
+Package: vcpkg-cmake
+Version: 2024-04-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 5405041a873b5fb01707c8e2037fa6f4cdd01759af84956e9b6d73c7fe2ae825
+Status: install ok installed
+
+Package: zlib
+Version: 1.3.2
+Port-Version: 1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 20787aff3339f2d0b63f10b0994d473d15ff1e4ad9ce9ebb5bac85df14d572bd
+Description: A compression library
+Status: install ok installed
+
+Package: curl
+Version: 8.6.0
+Depends: vcpkg-cmake, vcpkg-cmake-config, zlib
+Architecture: x64-windows
+Multi-Arch: same
+Abi: a862388532039e6718cb9bf8c7acc2db452951ce5eecf98d75f1a9d9dddcc2bf
+Description: A library for transferring data with URLs
+Default-Features: non-http, ssl
+Status: install ok installed
+
+Package: curl
+Feature: non-http
+Architecture: x64-windows
+Multi-Arch: same
+Description: Enables protocols beyond HTTP/HTTPS/HTTP2
+Status: install ok installed
+
+Package: curl
+Feature: schannel
+Architecture: x64-windows
+Multi-Arch: same
+Description: SSL support (Secure Channel)
+Status: install ok installed
+
+Package: curl
+Feature: ssl
+Architecture: x64-windows
+Multi-Arch: same
+Description: Default SSL backend
+Status: install ok installed
+
+Package: curl
+Feature: sspi
+Architecture: x64-windows
+Multi-Arch: same
+Description: SSPI support
+Status: install ok installed
+
+Package: eigen3
+Version: 3.4.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: f374eaa4b42d722d59b0e12e26ff82bc24695f4c805938e0f53273e3dbe7bb70
+Description: C++ template library for linear algebra: matrices, vectors, numerical solvers, and related algorithms.
+Status: install ok installed
+
+Package: nlohmann-json
+Version: 3.11.3
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 5e244b3d6fe54db225fc938f477911b68ddd272f6e5867c062c295215741ae68
+Description: JSON for Modern C++
+Status: install ok installed
+
+Package: fmt
+Version: 10.2.1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 436c4d9652752ffd81ab1af0a46396b9eb748d2ac608505c1f021747a599771e
+Description: Formatting library for C++. It can be used as a safe alternative to printf or as a fast alternative to IOStreams.
+Status: install ok installed
+
+Package: spdlog
+Version: 1.12.0
+Depends: fmt, vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: ed9a150140c0863be0fd24c21baf202261a77e76116452bbfee0db18daf4caa2
+Description: Very fast, header only, C++ logging library
+Status: install ok installed
+
+Package: xlnt
+Version: 1.5.0
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 571c963cf1163629658c6b6431af2bb00811a9acfaf90fdfdd85ac8bbe1548c7
+Description: Cross-platform user-friendly xlsx library for C++14
+Status: install ok installed
+

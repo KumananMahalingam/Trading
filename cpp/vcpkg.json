@@ -1,0 +1,22 @@
+{
+  "name": "trading-lstm-cpp",
+  "version": "1.0.0",
+  "description": "C++ migration of the Python LSTM trading platform (5-feature single-stream model).",
+  "builtin-baseline": "cac7d29f246eb789a84004fbfc11bb00db1aa89b",
+  "dependencies": [
+    { "name": "curl", "version>=": "8.6.0" },
+    { "name": "nlohmann-json", "version>=": "3.11.3" },
+    { "name": "eigen3", "version>=": "3.4.0" },
+    { "name": "xlnt", "version>=": "1.5.0" },
+    { "name": "fmt", "version>=": "10.2.1" },
+    { "name": "spdlog", "version>=": "1.12.0" }
+  ],
+  "overrides": [
+    { "name": "curl", "version": "8.6.0" },
+    { "name": "nlohmann-json", "version": "3.11.3" },
+    { "name": "eigen3", "version": "3.4.0" },
+    { "name": "xlnt", "version": "1.5.0" },
+    { "name": "fmt", "version": "10.2.1" },
+    { "name": "spdlog", "version": "1.12.0" }
+  ]
+}
